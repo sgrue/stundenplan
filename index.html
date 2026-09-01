@@ -1,0 +1,1436 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light">
+<title>Stundenplan</title>
+<style>
+  :root { color-scheme: light; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body { font-family: system-ui, -apple-system, 'Segoe UI', sans-serif; background: #F1F3F0; color: #1F2933; }
+  #root { min-height: 100vh; }
+  #root:empty::before {
+    content: "Wird geladen …";
+    display: block;
+    padding: 40px 20px;
+    color: #6B7A85;
+    font-family: Georgia, 'Times New Roman', serif;
+    font-style: italic;
+    font-size: 20px;
+  }
+  noscript {
+    display: block;
+    padding: 40px 20px;
+    color: #6B7A85;
+    font-family: Georgia, 'Times New Roman', serif;
+    font-style: italic;
+    font-size: 18px;
+  }
+</style>
+</head>
+<body>
+<div id="root"></div>
+<noscript>Für diese Seite muss JavaScript aktiviert sein.</noscript>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.5/babel.min.js"></script>
+<script type="text/babel" data-presets="react">
+const { useState, useRef, useEffect } = React;
+
+// ── Konstanten ────────────────────────────────────────────────────────────────
+const KEY = "stundenplan:v1";
+const APP_ID = "stundenplan";
+const FILE_VERSION = 1;
+const DAY_NAMES = ["Montag", "Dienstag", "Mittwoch", "Donnerstag", "Freitag", "Samstag"];
+const DAY_SHORT = ["Mo", "Di", "Mi", "Do", "Fr", "Sa"];
+const WEEKDAY_ICAL = ["MO", "TU", "WE", "TH", "FR", "SA"];
+const PX = 1.2;
+const STEP = 5;
+const STUDENT_DURS = [30, 40, 50];
+const PAUSE_DURS = [5, 10, 15, 20, 30];
+const OVERLAP_OPTIONS = [0, 5, 10, 15, 20];
+const DUR = {
+  30: { bg: "#2F7E7A", soft: "#D6EBEA" },
+  40: { bg: "#B7791F", soft: "#F4E6CC" },
+  50: { bg: "#6E4B9E", soft: "#E6DCF1" },
+};
+const PAUSE = { bg: "#8A949B", soft: "#E4E8E6" };
+const PREF = { bg: "#3F7A3D", soft: "#DFE9DC" };
+const C = {
+  bg: "#F1F3F0", paper: "#FBFBF9", ink: "#1F2933", muted: "#6B7A85",
+  line10: "#ECEEEA", line30: "#D5DAD3", line60: "#A9B2A8",
+  border: "#D9DED8", danger: "#B23A3A", dangerSoft: "#F6DCDC",
+};
+const MONO = "ui-monospace, SFMono-Regular, Menlo, Consolas, monospace";
+const SERIF = "Georgia, 'Times New Roman', serif";
+
+const fmt = (m) => `${String(Math.floor(m / 60)).padStart(2, "0")}:${String(m % 60).padStart(2, "0")}`;
+const fmtH = (m) => (m % 60 === 0 ? `${m / 60} h` : `${Math.floor(m / 60)}:${String(m % 60).padStart(2, "0")} h`);
+const fmtDur = (m) => (m < 60 ? `${m} min` : `${m} min · ${fmtH(m)}`);
+const uid = () => Math.random().toString(36).slice(2, 9);
+const isPause = (it) => it.type === "pause";
+const colorOf = (it) => (isPause(it) ? PAUSE : DUR[it.duration] || DUR[30]);
+
+const getOverlapInfo = (items, id, day, start, dur, maxOverlap) => {
+  const dragging = items.find((x) => x.id === id);
+  const isDraggingPause = dragging && dragging.type === "pause";
+  const end = start + dur;
+  const overlaps = [];
+  let tooMuch = false;
+  for (const s of items) {
+    if (s.id === id || s.day !== day) continue;
+    const oS = Math.max(start, s.start);
+    const oE = Math.min(end, s.start + s.duration);
+    const mins = Math.max(0, oE - oS);
+    if (mins === 0) continue;
+    if (isDraggingPause || s.type === "pause") { tooMuch = true; break; }
+    if (mins > maxOverlap) { tooMuch = true; break; }
+    overlaps.push({ id: s.id, name: s.name, mins });
+  }
+  return { tooMuch, overlaps };
+};
+
+const conflictsBlocked = (item, day, start, dur) =>
+  (item.blocked || []).some((b) => b.day === day && start < b.to && b.from < start + dur);
+const inPreferred = (item, day, start, dur) =>
+  (item.preferred || []).some((p) => p.day === day && start < p.to && p.from < start + dur);
+
+const layoutDay = (dayBlocks) => {
+  const sorted = [...dayBlocks].sort((a, b) => a.start - b.start || (a.id < b.id ? -1 : 1));
+  const layout = new Map();
+  let cluster = [];
+  let clusterEnd = -Infinity;
+  const packCluster = () => {
+    if (cluster.length === 0) return;
+    const columns = [];
+    for (const b of cluster) {
+      let placed = false;
+      for (const col of columns) {
+        const last = col[col.length - 1];
+        if (last.start + last.duration <= b.start) {
+          col.push(b); placed = true; break;
+        }
+      }
+      if (!placed) columns.push([b]);
+    }
+    const totalCols = columns.length;
+    columns.forEach((col, idx) => {
+      for (const b of col) layout.set(b.id, { col: idx, totalCols });
+    });
+    cluster = []; clusterEnd = -Infinity;
+  };
+  for (const b of sorted) {
+    if (b.start >= clusterEnd) packCluster();
+    cluster.push(b);
+    clusterEnd = Math.max(clusterEnd, b.start + b.duration);
+  }
+  packCluster();
+  return layout;
+};
+
+const overlapZonesFor = (dayBlocks) => {
+  const events = [];
+  for (const b of dayBlocks) {
+    events.push({ t: b.start, d: +1 });
+    events.push({ t: b.start + b.duration, d: -1 });
+  }
+  events.sort((a, b) => a.t - b.t || a.d - b.d);
+  const zones = [];
+  let active = 0;
+  let zoneStart = null;
+  for (const e of events) {
+    const prev = active;
+    active += e.d;
+    if (prev < 2 && active >= 2) zoneStart = e.t;
+    else if (prev >= 2 && active < 2 && zoneStart !== null) {
+      zones.push({ start: zoneStart, end: e.t });
+      zoneStart = null;
+    }
+  }
+  return zones;
+};
+
+// Freie Zeitfenster zwischen belegten Blöcken (ignoriert wenn Pause dazwischen liegt)
+const findGaps = (dayItems) => {
+  if (dayItems.length < 2) return [];
+  const sorted = [...dayItems].sort((a, b) => a.start - b.start);
+  const merged = [];
+  for (const s of sorted) {
+    const last = merged[merged.length - 1];
+    if (last && s.start <= last.end) {
+      last.end = Math.max(last.end, s.start + s.duration);
+    } else {
+      merged.push({ start: s.start, end: s.start + s.duration });
+    }
+  }
+  const gaps = [];
+  for (let i = 1; i < merged.length; i++) {
+    const gap = merged[i].start - merged[i - 1].end;
+    if (gap > 0) gaps.push({ start: merged[i - 1].end, end: merged[i].start, duration: gap });
+  }
+  return gaps;
+};
+
+const DEFAULT_SETTINGS = { startHour: 13, endHour: 20, days: [true, true, true, true, true, false], maxOverlap: 10, holidays: [] };
+
+// ── iCalendar (.ics) Helpers ──────────────────────────────────────────────────
+const pad2 = (n) => String(n).padStart(2, "0");
+const ymdString = (date) => `${date.getFullYear()}-${pad2(date.getMonth() + 1)}-${pad2(date.getDate())}`;
+const icalLocal = (date) =>
+  `${date.getFullYear()}${pad2(date.getMonth() + 1)}${pad2(date.getDate())}T${pad2(date.getHours())}${pad2(date.getMinutes())}00`;
+const icalUtc = (date) =>
+  `${date.getUTCFullYear()}${pad2(date.getUTCMonth() + 1)}${pad2(date.getUTCDate())}T${pad2(date.getUTCHours())}${pad2(date.getUTCMinutes())}${pad2(date.getUTCSeconds())}Z`;
+
+const escapeIcal = (str) => String(str)
+  .replace(/\\/g, "\\\\")
+  .replace(/;/g, "\\;")
+  .replace(/,/g, "\\,")
+  .replace(/\n/g, "\\n")
+  .replace(/\r/g, "");
+
+const unescapeIcal = (value) => String(value)
+  .replace(/\\n/gi, " ")
+  .replace(/\\,/g, ",")
+  .replace(/\\;/g, ";")
+  .replace(/\\\\/g, "\\");
+
+const parseYmd = (str) => {
+  if (typeof str !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(str)) return null;
+  const parts = str.split("-").map(Number);
+  const y = parts[0], m = parts[1], d = parts[2];
+  const date = new Date(y, m - 1, d);
+  if (date.getFullYear() !== y || date.getMonth() !== m - 1 || date.getDate() !== d) return null;
+  return date;
+};
+
+const firstWeekday = (startDate, dayIdx) => {
+  const targetJsDay = dayIdx + 1;
+  const d = new Date(startDate.getFullYear(), startDate.getMonth(), startDate.getDate());
+  const diff = (targetJsDay - d.getDay() + 7) % 7;
+  d.setDate(d.getDate() + diff);
+  return d;
+};
+
+const defaultIcalStart = () => {
+  const t = new Date();
+  const y = t.getMonth() >= 6 ? t.getFullYear() : t.getFullYear() - 1;
+  return `${y}-09-01`;
+};
+const defaultIcalEnd = () => {
+  const t = new Date();
+  const y = t.getMonth() >= 6 ? t.getFullYear() + 1 : t.getFullYear();
+  return `${y}-07-15`;
+};
+
+// ── Ferien-ICS Parser ─────────────────────────────────────────────────────────
+const unfoldIcsLines = (text) => {
+  const raw = String(text).split(/\r?\n/);
+  const out = [];
+  for (const line of raw) {
+    if ((line.startsWith(" ") || line.startsWith("\t")) && out.length > 0) {
+      out[out.length - 1] += line.substring(1);
+    } else {
+      out.push(line);
+    }
+  }
+  return out;
+};
+
+const parseIcsDateValue = (value) => {
+  const m = String(value).match(/(\d{4})(\d{2})(\d{2})/);
+  if (!m) return null;
+  return `${m[1]}-${m[2]}-${m[3]}`;
+};
+
+const parseHolidaysIcs = (text) => {
+  let lines;
+  try { lines = unfoldIcsLines(text); } catch (e) { return []; }
+  const holidays = [];
+  let inEvent = false;
+  let cur = null;
+
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (trimmed === "BEGIN:VEVENT") { inEvent = true; cur = {}; continue; }
+    if (trimmed === "END:VEVENT") {
+      if (cur && cur.from) {
+        holidays.push({
+          from: cur.from,
+          to: cur.toInclusive || cur.from,
+          name: cur.name || "Ferien",
+        });
+      }
+      inEvent = false; cur = null; continue;
+    }
+    if (!inEvent || !cur) continue;
+
+    const colonIdx = line.indexOf(":");
+    if (colonIdx < 0) continue;
+    const rawKey = line.substring(0, colonIdx);
+    const value = line.substring(colonIdx + 1);
+    const propName = rawKey.split(";")[0].toUpperCase();
+    const keyLower = rawKey.toLowerCase();
+
+    if (propName === "DTSTART") {
+      const d = parseIcsDateValue(value);
+      if (d) cur.from = d;
+    } else if (propName === "DTEND") {
+      const d = parseIcsDateValue(value);
+      if (d) {
+        const isAllDay = keyLower.indexOf("value=date") >= 0 || value.indexOf("T") < 0 || /T0{2,6}Z?$/.test(value);
+        if (isAllDay) {
+          const date = new Date(d + "T12:00:00");
+          date.setDate(date.getDate() - 1);
+          cur.toInclusive = ymdString(date);
+        } else {
+          cur.toInclusive = d;
+        }
+      }
+    } else if (propName === "SUMMARY") {
+      cur.name = unescapeIcal(value).slice(0, 60);
+    }
+  }
+  // Chronologisch sortieren
+  holidays.sort((a, b) => (a.from < b.from ? -1 : a.from > b.from ? 1 : 0));
+  return holidays;
+};
+
+const isDateHoliday = (dateStr, holidays) => {
+  if (!holidays || holidays.length === 0) return false;
+  for (const h of holidays) {
+    if (dateStr >= h.from && dateStr <= h.to) return true;
+  }
+  return false;
+};
+
+const formatDateRange = (from, to) => {
+  const f = from.split("-"), t = to.split("-");
+  if (from === to) return `${f[2]}.${f[1]}.${f[0]}`;
+  if (f[0] === t[0] && f[1] === t[1]) return `${f[2]}.–${t[2]}.${f[1]}.${f[0]}`;
+  if (f[0] === t[0]) return `${f[2]}.${f[1]}.–${t[2]}.${t[1]}.${f[0]}`;
+  return `${f[2]}.${f[1]}.${f[0]}–${t[2]}.${t[1]}.${t[0]}`;
+};
+
+// ── Kalender-Datei bauen ──────────────────────────────────────────────────────
+const buildIcs = (items, startStr, endStr, holidays) => {
+  holidays = holidays || [];
+  const schoolStart = parseYmd(startStr);
+  const schoolEnd = parseYmd(endStr);
+  if (!schoolStart) throw new Error("Ungültiges Startdatum");
+  if (!schoolEnd) throw new Error("Ungültiges Enddatum");
+  if (schoolEnd < schoolStart) throw new Error("Enddatum liegt vor dem Startdatum");
+
+  const dtstamp = icalUtc(new Date());
+  const lines = [
+    "BEGIN:VCALENDAR",
+    "VERSION:2.0",
+    "PRODID:-//Stundenplan//DE",
+    "CALSCALE:GREGORIAN",
+    "METHOD:PUBLISH",
+    "X-WR-CALNAME:Stundenplan",
+  ];
+
+  let count = 0;
+  let excludedCount = 0;
+  for (const s of items) {
+    if (s.day === null || s.type !== "student") continue;
+    const first = firstWeekday(schoolStart, s.day);
+    if (first > schoolEnd) continue;
+
+    const h = Math.floor(s.start / 60);
+    const m = s.start % 60;
+    const dtStart = new Date(first.getFullYear(), first.getMonth(), first.getDate(), h, m, 0);
+    const dtEnd = new Date(dtStart.getTime() + s.duration * 60000);
+    const until = new Date(schoolEnd.getFullYear(), schoolEnd.getMonth(), schoolEnd.getDate(), 23, 59, 59);
+
+    // EXDATE für alle Vorkommen an Ferientagen berechnen
+    const exdates = [];
+    if (holidays.length > 0) {
+      const iter = new Date(dtStart);
+      while (iter <= until) {
+        if (isDateHoliday(ymdString(iter), holidays)) {
+          exdates.push(icalLocal(iter));
+          excludedCount++;
+        }
+        iter.setDate(iter.getDate() + 7);
+      }
+    }
+
+    const eventLines = [
+      "BEGIN:VEVENT",
+      `UID:${s.id}-${startStr}-${endStr}@stundenplan`,
+      `DTSTAMP:${dtstamp}`,
+      `DTSTART:${icalLocal(dtStart)}`,
+      `DTEND:${icalLocal(dtEnd)}`,
+      `RRULE:FREQ=WEEKLY;UNTIL=${icalLocal(until)};BYDAY=${WEEKDAY_ICAL[s.day]}`,
+    ];
+    if (exdates.length > 0) eventLines.push(`EXDATE:${exdates.join(",")}`);
+    eventLines.push(
+      `SUMMARY:${escapeIcal(s.name)}`,
+      `DESCRIPTION:${escapeIcal("Musikunterricht · " + s.duration + " min")}`,
+      "END:VEVENT"
+    );
+    for (const l of eventLines) lines.push(l);
+    count++;
+  }
+
+  lines.push("END:VCALENDAR");
+  return { ics: lines.join("\r\n"), count, excludedCount };
+};
+
+const parseImport = (raw) => {
+  const data = typeof raw === "string" ? JSON.parse(raw) : raw;
+  if (!data || typeof data !== "object") throw new Error("Ungültiges Format");
+  const rawList = data.items || data.students;
+  if (!Array.isArray(rawList)) throw new Error("Keine Einträge gefunden");
+  const validDay = (d) => (typeof d === "number" && d >= 0 && d <= 5 ? d : null);
+  const validMin = (t) => (typeof t === "number" && t >= 0 && t < 24 * 60 ? t : null);
+  const validSpan = (a) => a && validDay(a.day) !== null && validMin(a.from) !== null && validMin(a.to) !== null && a.from < a.to;
+  const items = rawList.map((s) => {
+    const type = s.type === "pause" ? "pause" : "student";
+    const durSet = type === "pause" ? PAUSE_DURS : STUDENT_DURS;
+    const duration = durSet.includes(s.duration) ? s.duration : durSet[0];
+    return {
+      id: typeof s.id === "string" && s.id ? s.id : uid(),
+      type,
+      name: String(s.name != null ? s.name : (type === "pause" ? "Pause" : "Ohne Namen")).slice(0, 80),
+      duration,
+      day: validDay(s.day),
+      start: validMin(s.start),
+      blocked: type === "pause" ? [] : (Array.isArray(s.blocked) ? s.blocked : []).filter(validSpan).map((b) => ({ day: b.day, from: b.from, to: b.to })),
+      preferred: type === "pause" ? [] : (Array.isArray(s.preferred) ? s.preferred : []).filter(validSpan).map((p) => ({ day: p.day, from: p.from, to: p.to })),
+    };
+  });
+  let settings = Object.assign({}, DEFAULT_SETTINGS);
+  if (data.settings && typeof data.settings === "object") {
+    settings = Object.assign({}, DEFAULT_SETTINGS, data.settings);
+    if (!Array.isArray(settings.days) || settings.days.length !== 6) {
+      settings.days = [true, true, true, true, true, !!data.settings.showSat];
+    } else {
+      settings.days = settings.days.map((d) => !!d);
+    }
+    delete settings.showSat;
+    settings.startHour = Math.max(0, Math.min(22, Number(settings.startHour) || DEFAULT_SETTINGS.startHour));
+    settings.endHour = Math.max(settings.startHour + 1, Math.min(23, Number(settings.endHour) || DEFAULT_SETTINGS.endHour));
+    settings.maxOverlap = OVERLAP_OPTIONS.includes(Number(settings.maxOverlap)) ? Number(settings.maxOverlap) : DEFAULT_SETTINGS.maxOverlap;
+    settings.holidays = Array.isArray(settings.holidays)
+      ? settings.holidays
+          .filter((h) => h && /^\d{4}-\d{2}-\d{2}$/.test(h.from) && /^\d{4}-\d{2}-\d{2}$/.test(h.to) && h.from <= h.to)
+          .map((h) => ({ from: h.from, to: h.to, name: String(h.name || "Ferien").slice(0, 60) }))
+      : [];
+    if (!settings.days.some(Boolean)) settings.days = DEFAULT_SETTINGS.days.slice();
+  }
+  return { items, settings };
+};
+
+// ── App ───────────────────────────────────────────────────────────────────────
+function Stundenplan() {
+  const [items, setItems] = useState([]);
+  const [settings, setSettings] = useState(DEFAULT_SETTINGS);
+  const [loaded, setLoaded] = useState(false);
+  const [name, setName] = useState("");
+  const [dur, setDur] = useState(30);
+  const [drag, setDrag] = useState(null);
+  const [confirmDel, setConfirmDel] = useState(null);
+  const [confirmReset, setConfirmReset] = useState(false);
+  const [expandedId, setExpandedId] = useState(null);
+  const [importPreview, setImportPreview] = useState(null);
+  const [importError, setImportError] = useState("");
+  const [exportText, setExportText] = useState(null);
+  const [icalStart, setIcalStart] = useState(defaultIcalStart);
+  const [icalEnd, setIcalEnd] = useState(defaultIcalEnd);
+  const [icalMsg, setIcalMsg] = useState(null);
+  const [showAllHolidays, setShowAllHolidays] = useState(false);
+  const dragRef = useRef(null);
+  const colRefs = useRef([]);
+  const nameRef = useRef(null);
+  const fileInputRef = useRef(null);
+  const holidayFileRef = useRef(null);
+
+  const visibleDays = settings.days.map((v, i) => (v ? i : -1)).filter((i) => i >= 0);
+  const startMin = settings.startHour * 60;
+  const endMin = settings.endHour * 60;
+  const total = endMin - startMin;
+  const holidays = settings.holidays || [];
+
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem(KEY);
+      if (raw) {
+        const parsed = parseImport(raw);
+        setItems(parsed.items);
+        setSettings(parsed.settings);
+      }
+    } catch (e) { /* noch nichts gespeichert */ }
+    setLoaded(true);
+  }, []);
+
+  useEffect(() => {
+    if (!loaded) return;
+    try { localStorage.setItem(KEY, JSON.stringify({ items, settings })); }
+    catch (e) { console.error("Speichern fehlgeschlagen", e); }
+  }, [items, settings, loaded]);
+
+  const update = (id, patch) => setItems((list) => list.map((s) => (s.id === id ? Object.assign({}, s, patch) : s)));
+  const remove = (id) => { if (expandedId === id) setExpandedId(null); setItems((list) => list.filter((x) => x.id !== id)); };
+
+  const addStudent = () => {
+    const n = name.trim();
+    if (!n) return;
+    setItems((list) => [...list, { id: uid(), type: "student", name: n, duration: dur, day: null, start: null, blocked: [], preferred: [] }]);
+    setName("");
+    nameRef.current && nameRef.current.focus();
+  };
+
+  const addPause = (d) => {
+    setItems((list) => [...list, { id: uid(), type: "pause", name: "Pause", duration: d, day: null, start: null }]);
+  };
+
+  const changeDuration = (s, d) => {
+    if (s.day !== null && (
+      s.start + d > endMin ||
+      getOverlapInfo(items, s.id, s.day, s.start, d, settings.maxOverlap).tooMuch ||
+      conflictsBlocked(s, s.day, s.start, d)
+    )) {
+      update(s.id, { duration: d, day: null, start: null });
+    } else {
+      update(s.id, { duration: d });
+    }
+  };
+
+  const addAvail = (id, kind, day, from, to) => {
+    if (from >= to) return;
+    const key = kind === "blocked" ? "blocked" : "preferred";
+    setItems((list) => list.map((s) => {
+      if (s.id !== id) return s;
+      const arr = [...(s[key] || []), { day, from, to }].sort((a, b) => a.day - b.day || a.from - b.from);
+      const next = Object.assign({}, s, { [key]: arr });
+      if (kind === "blocked" && s.day === day && s.start < to && from < s.start + s.duration) {
+        next.day = null;
+        next.start = null;
+      }
+      return next;
+    }));
+  };
+
+  const removeAvail = (id, kind, idx) => {
+    const key = kind === "blocked" ? "blocked" : "preferred";
+    setItems((list) => list.map((s) => (s.id !== id ? s : Object.assign({}, s, { [key]: (s[key] || []).filter((_, i) => i !== idx) }))));
+  };
+
+  const changeRange = (patch) => {
+    const next = Object.assign({}, settings, patch);
+    if (next.endHour <= next.startHour) return;
+    const sMin = next.startHour * 60, eMin = next.endHour * 60;
+    setItems((list) =>
+      list.map((s) =>
+        s.day !== null && (s.start < sMin || s.start + s.duration > eMin || !next.days[s.day])
+          ? Object.assign({}, s, { day: null, start: null })
+          : s
+      )
+    );
+    setSettings(next);
+  };
+
+  const toggleDay = (i) => {
+    const days = settings.days.slice();
+    days[i] = !days[i];
+    if (days.filter(Boolean).length === 0) return;
+    changeRange({ days });
+  };
+
+  const triggerDownload = (text, filename, mime) => {
+    const blob = new Blob([text], { type: mime });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename;
+    a.rel = "noopener";
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  };
+
+  const doExport = () => {
+    const data = { app: APP_ID, version: FILE_VERSION, exportedAt: new Date().toISOString(), items, settings };
+    const json = JSON.stringify(data, null, 2);
+    const filename = "stundenplan-" + new Date().toISOString().slice(0, 10) + ".json";
+    try { triggerDownload(json, filename, "application/json"); }
+    catch (e) { setExportText({ text: json, filename, kind: "json" }); }
+  };
+
+  const copyToClipboard = async () => {
+    if (!exportText) return;
+    try {
+      await navigator.clipboard.writeText(exportText.text);
+      setExportText(Object.assign({}, exportText, { copied: true }));
+      setTimeout(() => setExportText((s) => s ? Object.assign({}, s, { copied: false }) : null), 1500);
+    } catch (e) {}
+  };
+
+  const onFile = (e) => {
+    const file = e.target.files && e.target.files[0];
+    e.target.value = "";
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (ev) => {
+      try {
+        const parsed = parseImport(ev.target.result);
+        setImportPreview(parsed);
+        setImportError("");
+      } catch (err) {
+        setImportPreview(null);
+        setImportError("Datei ist kein gültiger Stundenplan-Export.");
+      }
+    };
+    reader.onerror = () => { setImportError("Datei konnte nicht gelesen werden."); };
+    reader.readAsText(file);
+  };
+
+  const applyImport = () => {
+    if (!importPreview) return;
+    setItems(importPreview.items);
+    setSettings(importPreview.settings);
+    setExpandedId(null);
+    setConfirmDel(null);
+    setConfirmReset(false);
+    setImportPreview(null);
+  };
+
+  const cancelImport = () => { setImportPreview(null); setImportError(""); };
+
+  // ── Ferien-Datei laden ──
+  const onHolidayFile = (e) => {
+    const file = e.target.files && e.target.files[0];
+    e.target.value = "";
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (ev) => {
+      try {
+        const list = parseHolidaysIcs(ev.target.result);
+        if (list.length === 0) {
+          setIcalMsg({ ok: false, text: "Keine Ferienzeiträume in der Datei gefunden." });
+          return;
+        }
+        setSettings((s) => Object.assign({}, s, { holidays: list }));
+        setIcalMsg({ ok: true, text: `${list.length} Ferienzeitr${list.length === 1 ? "aum" : "äume"} geladen.` });
+        setShowAllHolidays(false);
+      } catch (err) {
+        setIcalMsg({ ok: false, text: "Ferien-Datei konnte nicht gelesen werden." });
+      }
+    };
+    reader.onerror = () => { setIcalMsg({ ok: false, text: "Ferien-Datei konnte nicht gelesen werden." }); };
+    reader.readAsText(file);
+  };
+
+  const clearHolidays = () => {
+    setSettings((s) => Object.assign({}, s, { holidays: [] }));
+    setIcalMsg(null);
+    setShowAllHolidays(false);
+  };
+
+  // ── Kalender-Export (.ics) ──
+  const doIcalExport = () => {
+    setIcalMsg(null);
+    try {
+      const result = buildIcs(items, icalStart, icalEnd, holidays);
+      if (result.count === 0) {
+        setIcalMsg({ ok: false, text: "Keine Unterrichtstermine im gewählten Zeitraum." });
+        return;
+      }
+      const filename = `stundenplan-${icalStart}-bis-${icalEnd}.ics`;
+      let msg = `${result.count} Termin${result.count === 1 ? "" : "e"} erstellt`;
+      if (holidays.length > 0) {
+        msg += ` (${result.excludedCount} durch Ferien ausgeklammert)`;
+      }
+      try {
+        triggerDownload(result.ics, filename, "text/calendar;charset=utf-8");
+        setIcalMsg({ ok: true, text: msg });
+      } catch (e) {
+        setExportText({ text: result.ics, filename, kind: "ics" });
+      }
+    } catch (e) {
+      setIcalMsg({ ok: false, text: e.message });
+    }
+  };
+
+  // ── Drag & Drop ──
+  const startDrag = (e, s, fromGrid) => {
+    if (e.button !== undefined && e.button !== 0) return;
+    const rect = e.currentTarget.getBoundingClientRect();
+    const offset = fromGrid ? e.clientY - rect.top : (s.duration * PX) / 2;
+    dragRef.current = { id: s.id, offset, x0: e.clientX, y0: e.clientY, moved: false, fromGrid, preview: null };
+    try { e.currentTarget.setPointerCapture(e.pointerId); } catch (err) {}
+  };
+
+  const moveDrag = (e) => {
+    const d = dragRef.current;
+    if (!d) return;
+    if (!d.moved && Math.hypot(e.clientX - d.x0, e.clientY - d.y0) > 4) d.moved = true;
+    if (!d.moved) return;
+    const s = items.find((x) => x.id === d.id);
+    if (!s) return;
+    let day = null, start = null, valid = false, reason = "", preferred = false, overlapWith = [];
+    for (const i of visibleDays) {
+      const el = colRefs.current[i];
+      if (!el) continue;
+      const r = el.getBoundingClientRect();
+      if (e.clientX >= r.left && e.clientX < r.right) {
+        day = i;
+        const raw = (e.clientY - d.offset - r.top) / PX;
+        start = startMin + Math.round(raw / STEP) * STEP;
+        start = Math.max(startMin, Math.min(endMin - s.duration, start));
+        const info = getOverlapInfo(items, s.id, day, start, s.duration, settings.maxOverlap);
+        if (info.tooMuch) { valid = false; reason = "Belegt"; }
+        else if (!isPause(s) && conflictsBlocked(s, day, start, s.duration)) { valid = false; reason = "Sperrzeit"; }
+        else {
+          valid = true;
+          preferred = !isPause(s) && inPreferred(s, day, start, s.duration);
+          overlapWith = info.overlaps;
+        }
+        break;
+      }
+    }
+    const preview = { id: d.id, x: e.clientX, y: e.clientY, day, start, valid, reason, preferred, overlapWith, fromGrid: d.fromGrid };
+    d.preview = preview;
+    setDrag(preview);
+  };
+
+  const endDrag = () => {
+    const d = dragRef.current;
+    dragRef.current = null;
+    setDrag(null);
+    if (!d || !d.moved || !d.preview) return;
+    const p = d.preview;
+    if (p.day !== null && p.valid) update(d.id, { day: p.day, start: p.start });
+    else if (p.day === null && d.fromGrid) update(d.id, { day: null, start: null });
+  };
+
+  const dragProps = (s, fromGrid) => ({
+    onPointerDown: (e) => startDrag(e, s, fromGrid),
+    onPointerMove: moveDrag,
+    onPointerUp: endDrag,
+    onPointerCancel: endDrag,
+  });
+  const dragStyle = { touchAction: "none", userSelect: "none" };
+
+  const layouts = {};
+  const zones = {};
+  const gaps = {};
+  visibleDays.forEach((i) => {
+    const dayItems = items.filter((s) => s.day === i);
+    layouts[i] = layoutDay(dayItems);
+    zones[i] = overlapZonesFor(dayItems);
+    gaps[i] = findGaps(dayItems);
+  });
+
+  const unscheduled = items.filter((s) => s.day === null);
+  const scheduled = items.filter((s) => s.day !== null).sort((a, b) => a.day - b.day || a.start - b.start);
+  const scheduledStudentCount = items.filter((s) => s.day !== null && s.type === "student").length;
+  const dragged = drag ? items.find((s) => s.id === drag.id) : null;
+  const focusedId = drag ? drag.id : expandedId;
+  const focused = focusedId ? items.find((s) => s.id === focusedId) : null;
+  const dayCount = visibleDays.length;
+
+  const Swatch = ({ it }) => (
+    <span style={{ width: 10, height: 10, borderRadius: 3, flexShrink: 0, background: isPause(it) ? "transparent" : colorOf(it).bg, border: isPause(it) ? `2px dashed ${PAUSE.bg}` : "none", boxSizing: "border-box" }} />
+  );
+
+  const renderItem = (s) => {
+    const isExp = expandedId === s.id;
+    const hasBlk = (s.blocked || []).length > 0;
+    const hasPref = (s.preferred || []).length > 0;
+    return (
+      <div key={s.id} style={{ marginBottom: 6 }}>
+        <div
+          className={"sp-card draggable" + (isExp ? " expanded" : "")}
+          {...dragProps(s, s.day !== null)}
+          style={Object.assign({}, dragStyle, { opacity: drag && drag.id === s.id ? 0.4 : 1, marginBottom: 0 })}
+        >
+          <Swatch it={s} />
+          <span style={{ flex: 1, minWidth: 0 }}>
+            <span style={{ display: "block", fontSize: 14, fontWeight: isPause(s) ? 400 : 500, color: isPause(s) ? C.muted : C.ink, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{s.name}</span>
+            {s.day !== null && (
+              <span style={{ fontSize: 11, color: C.muted, fontFamily: MONO }}>{DAY_SHORT[s.day]} {fmt(s.start)}–{fmt(s.start + s.duration)}</span>
+            )}
+          </span>
+          {!isPause(s) && (
+            <button
+              onClick={() => setExpandedId(isExp ? null : s.id)}
+              onPointerDown={(e) => e.stopPropagation()}
+              className="sp-chev"
+              aria-label={`Verfügbarkeit ${isExp ? "zuklappen" : "öffnen"}`}
+              aria-expanded={isExp}
+              title="Sperr- und Wunschzeiten"
+            >
+              <span style={{ display: "inline-flex", gap: 2, marginRight: 4 }}>
+                {hasBlk && <span style={{ width: 6, height: 6, borderRadius: "50%", background: C.danger }} />}
+                {hasPref && <span style={{ width: 6, height: 6, borderRadius: "50%", background: PREF.bg }} />}
+              </span>
+              <span style={{ fontSize: 10, color: C.muted }}>{isExp ? "▴" : "▾"}</span>
+            </button>
+          )}
+          <ItemControls
+            s={s}
+            onDur={changeDuration}
+            confirmDel={confirmDel}
+            setConfirmDel={setConfirmDel}
+            onDelete={() => remove(s.id)}
+            onUnschedule={s.day !== null ? () => update(s.id, { day: null, start: null }) : null}
+          />
+        </div>
+        {isExp && !isPause(s) && (
+          <AvailEditor s={s} addAvail={addAvail} removeAvail={removeAvail} visibleDays={visibleDays} startHour={settings.startHour} endHour={settings.endHour} />
+        )}
+      </div>
+    );
+  };
+
+  return (
+    <div style={{ fontFamily: "system-ui, -apple-system, 'Segoe UI', sans-serif", background: C.bg, color: C.ink, minHeight: "100vh", padding: 20 }}>
+      <style>{`
+        .sp-root { display: flex; gap: 20px; align-items: flex-start; }
+        .sp-side { flex: 0 0 300px; }
+        .sp-main { flex: 1; min-width: 0; }
+        @media (max-width: 760px) { .sp-root { flex-direction: column; } .sp-side { flex: none; width: 100%; } }
+        .sp-btn { border: 1px solid ${C.border}; background: ${C.paper}; color: ${C.ink}; border-radius: 6px; padding: 6px 10px; font-size: 13px; cursor: pointer; font-family: inherit; }
+        .sp-btn:hover { border-color: ${C.line60}; }
+        .sp-btn:focus-visible, .sp-input:focus-visible, .sp-seg:focus-visible, .sp-chip:focus-visible, .sp-chev:focus-visible, .sp-tp:focus-visible, .sp-av-input:focus-visible, .sp-sel:focus-visible { outline: 2px solid ${C.ink}; outline-offset: 2px; }
+        .sp-input { border: 1px solid ${C.border}; background: ${C.paper}; border-radius: 6px; padding: 8px 10px; font-size: 14px; font-family: inherit; color: ${C.ink}; width: 100%; box-sizing: border-box; }
+        .sp-seg { flex: 1; border: 1px solid ${C.border}; background: ${C.paper}; padding: 7px 0; font-size: 13px; font-family: inherit; cursor: pointer; color: ${C.ink}; }
+        .sp-seg:first-child { border-radius: 6px 0 0 6px; } .sp-seg:last-child { border-radius: 0 6px 6px 0; }
+        .sp-seg.pause:hover { background: ${PAUSE.soft}; }
+        .sp-chip { border: 1px solid ${C.border}; background: ${C.paper}; color: ${C.muted}; border-radius: 6px; padding: 5px 0; flex: 1; font-size: 12px; font-family: inherit; cursor: pointer; }
+        .sp-chip.on { background: ${C.ink}; color: #fff; border-color: ${C.ink}; }
+        .sp-chip:disabled { cursor: not-allowed; opacity: .6; }
+        .sp-card { border: 1px solid ${C.border}; background: ${C.paper}; border-radius: 8px; padding: 8px 10px; display: flex; align-items: center; gap: 8px; }
+        .sp-card.draggable { cursor: grab; }
+        .sp-card.draggable:hover { border-color: ${C.line60}; }
+        .sp-card.expanded { border-bottom-left-radius: 0; border-bottom-right-radius: 0; border-bottom-color: ${C.line10}; }
+        .sp-chev { border: 1px solid ${C.border}; background: ${C.paper}; border-radius: 5px; padding: 3px 5px; cursor: pointer; display: inline-flex; align-items: center; font-family: inherit; }
+        .sp-chev:hover { border-color: ${C.line60}; }
+        .sp-x { border: none; background: none; color: ${C.muted}; cursor: pointer; font-size: 16px; line-height: 1; padding: 2px 4px; border-radius: 4px; }
+        .sp-x:hover { color: ${C.danger}; background: ${C.dangerSoft}; }
+        select.sp-sel { border: 1px solid ${C.border}; background: ${C.paper}; border-radius: 5px; padding: 4px 6px; font-size: 12px; font-family: inherit; color: ${C.ink}; }
+        .sp-block { position: absolute; border-radius: 5px; color: #fff; padding: 4px 7px; box-sizing: border-box; overflow: hidden; cursor: grab; box-shadow: 0 1px 2px rgba(0,0,0,.15); z-index: 3; }
+        .sp-block.pause { color: ${C.muted}; box-shadow: none; border: 1px dashed ${PAUSE.bg}; background: repeating-linear-gradient(135deg, ${PAUSE.soft} 0 6px, ${C.paper} 6px 12px); padding: 2px 7px; }
+        .sp-block:active { cursor: grabbing; }
+        .sp-av-input { border: 1px solid ${C.border}; background: ${C.paper}; border-radius: 5px; padding: 4px 6px; font-size: 12px; font-family: inherit; color: ${C.ink}; }
+        .sp-tp { border: 1px solid ${C.border}; background: ${C.paper}; border-radius: 5px; padding: 3px 4px; font-size: 12px; font-family: ${MONO}; font-variant-numeric: tabular-nums; color: ${C.ink}; cursor: pointer; }
+        .sp-mini { border: 1px solid ${C.border}; background: ${C.paper}; color: ${C.muted}; border-radius: 4px; padding: 2px 6px; font-size: 11px; cursor: pointer; font-family: inherit; }
+        .sp-mini:hover { border-color: ${C.line60}; color: ${C.ink}; }
+        @media (prefers-reduced-motion: no-preference) { .sp-block { transition: opacity .15s; } }
+      `}</style>
+
+      <div className="sp-root">
+        <aside className="sp-side">
+          <h1 style={{ fontFamily: SERIF, fontStyle: "italic", fontWeight: 400, fontSize: 30, margin: "0 0 2px", letterSpacing: "-0.01em" }}>Stundenplan</h1>
+          <p style={{ margin: "0 0 18px", fontSize: 13, color: C.muted }}>Wochenplan · SchülerInnen anlegen und in den Plan ziehen</p>
+
+          <section style={{ background: C.paper, border: `1px solid ${C.border}`, borderRadius: 10, padding: 14, marginBottom: 12 }}>
+            <div style={{ fontSize: 11, textTransform: "uppercase", letterSpacing: "0.08em", color: C.muted, marginBottom: 8 }}>Neue SchülerIn</div>
+            <input
+              ref={nameRef}
+              className="sp-input"
+              placeholder="Name"
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && addStudent()}
+              aria-label="Name der SchülerIn"
+            />
+            <div style={{ display: "flex", marginTop: 8 }} role="radiogroup" aria-label="Unterrichtsdauer">
+              {STUDENT_DURS.map((d) => (
+                <button
+                  key={d}
+                  className="sp-seg"
+                  role="radio"
+                  aria-checked={dur === d}
+                  onClick={() => setDur(d)}
+                  style={dur === d ? { background: DUR[d].bg, color: "#fff", borderColor: DUR[d].bg, fontWeight: 600 } : {}}
+                >
+                  {d} min
+                </button>
+              ))}
+            </div>
+            <button className="sp-btn" onClick={addStudent} disabled={!name.trim()} style={{ marginTop: 10, width: "100%", padding: 9, fontWeight: 600, opacity: name.trim() ? 1 : 0.5 }}>
+              SchülerIn anlegen
+            </button>
+          </section>
+
+          <section style={{ background: C.paper, border: `1px solid ${C.border}`, borderRadius: 10, padding: 14, marginBottom: 18 }}>
+            <div style={{ fontSize: 11, textTransform: "uppercase", letterSpacing: "0.08em", color: C.muted, marginBottom: 8 }}>Pause anlegen</div>
+            <div style={{ display: "flex" }}>
+              {PAUSE_DURS.map((d) => (
+                <button key={d} className="sp-seg pause" onClick={() => addPause(d)} title={`Pause von ${d} Minuten anlegen`} style={{ fontSize: 12 }}>
+                  {d}
+                </button>
+              ))}
+            </div>
+            <div style={{ fontSize: 11, color: C.muted, marginTop: 6 }}>Minuten · erscheint in der Liste und wird wie SchülerInnen in den Plan gezogen</div>
+          </section>
+
+          <div style={{ fontSize: 11, textTransform: "uppercase", letterSpacing: "0.08em", color: C.muted, marginBottom: 8 }}>
+            Noch nicht eingeplant · {unscheduled.length}
+          </div>
+          {items.length === 0 && (
+            <p style={{ fontSize: 13, color: C.muted, margin: "0 0 14px" }}>Noch keine SchülerInnen. Lege oben die erste an.</p>
+          )}
+          {unscheduled.length === 0 && items.length > 0 && (
+            <p style={{ fontSize: 13, color: C.muted, margin: "0 0 14px" }}>Alles ist eingeplant.</p>
+          )}
+          {unscheduled.map(renderItem)}
+
+          {scheduled.length > 0 && (
+            <>
+              <div style={{ fontSize: 11, textTransform: "uppercase", letterSpacing: "0.08em", color: C.muted, margin: "16px 0 8px" }}>
+                Eingeplant · {scheduled.length}
+              </div>
+              {scheduled.map(renderItem)}
+            </>
+          )}
+
+          <section style={{ marginTop: 22, paddingTop: 14, borderTop: `1px solid ${C.border}`, fontSize: 13 }}>
+            <div style={{ fontSize: 11, textTransform: "uppercase", letterSpacing: "0.08em", color: C.muted, marginBottom: 8 }}>Tage</div>
+            <div style={{ display: "flex", gap: 4, marginBottom: 6 }}>
+              {DAY_SHORT.map((d, i) => {
+                const used = items.some((s) => s.day === i);
+                return (
+                  <button
+                    key={d}
+                    className={"sp-chip" + (settings.days[i] ? " on" : "")}
+                    onClick={() => toggleDay(i)}
+                    disabled={used}
+                    aria-pressed={settings.days[i]}
+                    title={used ? `${DAY_NAMES[i]} ist belegt und kann nicht ausgeblendet werden` : settings.days[i] ? `${DAY_NAMES[i]} ausblenden` : `${DAY_NAMES[i]} einblenden`}
+                  >
+                    {d}
+                  </button>
+                );
+              })}
+            </div>
+            <div style={{ fontSize: 11, color: C.muted, marginBottom: 12 }}>Belegte Tage lassen sich nicht ausblenden.</div>
+
+            <div style={{ fontSize: 11, textTransform: "uppercase", letterSpacing: "0.08em", color: C.muted, marginBottom: 8 }}>Uhrzeit</div>
+            <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 14 }}>
+              <span>Von</span>
+              <input type="number" className="sp-input" style={{ width: 62, padding: "5px 6px" }} min={6} max={22} value={settings.startHour} onChange={(e) => changeRange({ startHour: +e.target.value })} aria-label="Beginn (Stunde)" />
+              <span>bis</span>
+              <input type="number" className="sp-input" style={{ width: 62, padding: "5px 6px" }} min={7} max={23} value={settings.endHour} onChange={(e) => changeRange({ endHour: +e.target.value })} aria-label="Ende (Stunde)" />
+              <span>Uhr</span>
+            </div>
+
+            <div style={{ fontSize: 11, textTransform: "uppercase", letterSpacing: "0.08em", color: C.muted, marginBottom: 8 }}>Gruppen-Überlappung</div>
+            <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 6 }}>
+              <span>bis zu</span>
+              <select
+                className="sp-sel"
+                value={settings.maxOverlap}
+                onChange={(e) => setSettings((s) => Object.assign({}, s, { maxOverlap: +e.target.value }))}
+                aria-label="Maximale Überlappung"
+                style={{ fontSize: 13, padding: "5px 6px" }}
+              >
+                {OVERLAP_OPTIONS.map((o) => (
+                  <option key={o} value={o}>{o === 0 ? "keine" : `${o} min`}</option>
+                ))}
+              </select>
+              <span>Überlappung</span>
+            </div>
+            <div style={{ fontSize: 11, color: C.muted, marginBottom: 12 }}>Überlappende SchülerInnen werden nebeneinander dargestellt.</div>
+
+            <div style={{ fontSize: 11, textTransform: "uppercase", letterSpacing: "0.08em", color: C.muted, marginBottom: 8 }}>Datei</div>
+            <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+              <button className="sp-btn" onClick={doExport} disabled={items.length === 0} style={{ opacity: items.length === 0 ? 0.5 : 1 }}>Exportieren</button>
+              <button className="sp-btn" onClick={() => fileInputRef.current && fileInputRef.current.click()}>Importieren</button>
+              <input type="file" accept=".json,application/json" ref={fileInputRef} onChange={onFile} style={{ display: "none" }} aria-hidden />
+            </div>
+            <div style={{ fontSize: 11, color: C.muted, marginTop: 6 }}>Sichert SchülerInnen, Pausen, Verfügbarkeiten und Einstellungen als JSON-Datei. Daten bleiben lokal in deinem Browser.</div>
+            {importError && (
+              <div style={{ fontSize: 12, color: C.danger, marginTop: 8, padding: "6px 8px", background: C.dangerSoft, borderRadius: 5 }}>
+                {importError}
+                <button onClick={() => setImportError("")} className="sp-x" style={{ float: "right", color: C.danger, fontSize: 14 }} aria-label="Meldung schließen">×</button>
+              </div>
+            )}
+            {importPreview && (
+              <div style={{ marginTop: 8, padding: 10, background: "#F7F7F5", border: `1px solid ${C.border}`, borderRadius: 6, fontSize: 12 }}>
+                <div style={{ marginBottom: 8 }}>
+                  Datei enthält <strong>{importPreview.items.length}</strong>{" "}
+                  {importPreview.items.length === 1 ? "Eintrag" : "Einträge"}
+                  {items.length > 0 && ". Bestehende Daten werden ersetzt."}
+                  {items.length === 0 && "."}
+                </div>
+                <div style={{ display: "flex", gap: 6 }}>
+                  <button className="sp-btn" style={{ color: C.danger, borderColor: C.danger, fontWeight: 600 }} onClick={applyImport}>
+                    {items.length > 0 ? "Ersetzen" : "Importieren"}
+                  </button>
+                  <button className="sp-btn" onClick={cancelImport}>Abbrechen</button>
+                </div>
+              </div>
+            )}
+
+            <div style={{ fontSize: 11, textTransform: "uppercase", letterSpacing: "0.08em", color: C.muted, marginTop: 18, marginBottom: 8 }}>Google Kalender</div>
+            <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 10, flexWrap: "wrap", fontSize: 12 }}>
+              <span>Schuljahr</span>
+              <input type="date" value={icalStart} onChange={(e) => { setIcalStart(e.target.value); setIcalMsg(null); }} className="sp-input" style={{ width: 138, padding: "4px 6px", fontSize: 12 }} aria-label="Schuljahr-Beginn" />
+              <span>bis</span>
+              <input type="date" value={icalEnd} onChange={(e) => { setIcalEnd(e.target.value); setIcalMsg(null); }} className="sp-input" style={{ width: 138, padding: "4px 6px", fontSize: 12 }} aria-label="Schuljahr-Ende" />
+            </div>
+
+            <div style={{ fontSize: 11, color: C.muted, marginBottom: 4 }}>Ferien (optional)</div>
+            {holidays.length === 0 ? (
+              <div style={{ marginBottom: 10 }}>
+                <button className="sp-btn" onClick={() => holidayFileRef.current && holidayFileRef.current.click()} style={{ fontSize: 12, padding: "4px 10px" }}>
+                  Ferien-Datei (.ics) laden
+                </button>
+                <div style={{ fontSize: 11, color: C.muted, marginTop: 4 }}>Ereignisse aus der Datei werden als schulfreie Tage übernommen.</div>
+              </div>
+            ) : (
+              <div style={{ marginBottom: 10, padding: 8, background: "#F7F7F5", border: `1px solid ${C.border}`, borderRadius: 6 }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap", marginBottom: 6 }}>
+                  <span style={{ fontSize: 12 }}>
+                    <strong>{holidays.length}</strong> Zeit{holidays.length === 1 ? "raum" : "räume"}
+                  </span>
+                  <button className="sp-mini" onClick={() => holidayFileRef.current && holidayFileRef.current.click()}>Neu laden</button>
+                  <button className="sp-mini" onClick={clearHolidays} title="Ferien entfernen">Entfernen</button>
+                </div>
+                {(showAllHolidays ? holidays : holidays.slice(0, 3)).map((h, i) => (
+                  <div key={i} style={{ fontSize: 11, color: C.muted, fontFamily: MONO, fontVariantNumeric: "tabular-nums", lineHeight: 1.5 }}>
+                    {formatDateRange(h.from, h.to)} · <span style={{ fontFamily: "inherit" }}>{h.name}</span>
+                  </div>
+                ))}
+                {holidays.length > 3 && (
+                  <button className="sp-mini" onClick={() => setShowAllHolidays((v) => !v)} style={{ marginTop: 4, border: "none", padding: "2px 0", background: "transparent", color: C.muted, fontStyle: "italic" }}>
+                    {showAllHolidays ? "weniger anzeigen" : `+${holidays.length - 3} weitere anzeigen`}
+                  </button>
+                )}
+              </div>
+            )}
+            <input type="file" accept=".ics,text/calendar" ref={holidayFileRef} onChange={onHolidayFile} style={{ display: "none" }} aria-hidden />
+
+            <button
+              className="sp-btn"
+              onClick={doIcalExport}
+              disabled={scheduledStudentCount === 0}
+              style={{ opacity: scheduledStudentCount === 0 ? 0.5 : 1, fontWeight: 600 }}
+              title={scheduledStudentCount === 0 ? "Keine eingeplanten SchülerInnen" : "Kalenderdatei erstellen"}
+            >
+              Kalender-Datei (.ics) erstellen
+            </button>
+            {icalMsg && (
+              <div style={{
+                fontSize: 11,
+                marginTop: 6,
+                color: icalMsg.ok ? PREF.bg : C.danger,
+                padding: icalMsg.ok ? "0" : "4px 8px",
+                background: icalMsg.ok ? "transparent" : C.dangerSoft,
+                borderRadius: 4,
+              }}>
+                {icalMsg.text}
+              </div>
+            )}
+            <div style={{ fontSize: 11, color: C.muted, marginTop: 6 }}>
+              Wöchentliche Wiederholung pro SchülerIn bis Schuljahresende. In Google Kalender: Einstellungen ▸ Importieren und exportieren ▸ Datei auswählen.
+            </div>
+
+            <div style={{ marginTop: 18 }}>
+              {confirmReset ? (
+                <span style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
+                  <span style={{ color: C.danger }}>Alle SchülerInnen und Pausen löschen?</span>
+                  <button className="sp-btn" style={{ color: C.danger }} onClick={() => { setItems([]); setExpandedId(null); setConfirmReset(false); }}>Ja, löschen</button>
+                  <button className="sp-btn" onClick={() => setConfirmReset(false)}>Abbrechen</button>
+                </span>
+              ) : (
+                <button className="sp-btn" style={{ color: C.muted }} onClick={() => setConfirmReset(true)}>Alles zurücksetzen</button>
+              )}
+            </div>
+          </section>
+        </aside>
+
+        <main className="sp-main">
+          {focused && !isPause(focused) && ((focused.blocked || []).length > 0 || (focused.preferred || []).length > 0) && (
+            <div style={{ display: "flex", gap: 14, alignItems: "center", fontSize: 12, color: C.muted, marginBottom: 8, padding: "0 4px", flexWrap: "wrap" }}>
+              <span>Verfügbarkeit von <strong style={{ color: C.ink }}>{focused.name}</strong>:</span>
+              {(focused.blocked || []).length > 0 && (
+                <span style={{ display: "inline-flex", alignItems: "center", gap: 5 }}>
+                  <span style={{ width: 14, height: 10, background: "repeating-linear-gradient(135deg, rgba(178,58,58,0.20) 0 4px, transparent 4px 8px)", border: `1px solid rgba(178,58,58,0.35)` }} />
+                  Sperrzeit
+                </span>
+              )}
+              {(focused.preferred || []).length > 0 && (
+                <span style={{ display: "inline-flex", alignItems: "center", gap: 5 }}>
+                  <span style={{ width: 14, height: 10, background: "rgba(63,122,61,0.12)", borderLeft: `3px solid ${PREF.bg}` }} />
+                  Wunschzeit
+                </span>
+              )}
+            </div>
+          )}
+
+          <div style={{ background: C.paper, border: `1px solid ${C.border}`, borderRadius: 10, overflowX: "auto" }}>
+            <div style={{ minWidth: 64 + dayCount * 120 }}>
+              <div style={{ display: "grid", gridTemplateColumns: `56px repeat(${dayCount}, 1fr)`, borderBottom: `1px solid ${C.line60}` }}>
+                <div />
+                {visibleDays.map((i) => {
+                  const list = items.filter((s) => s.day === i && !isPause(s));
+                  const mins = list.reduce((a, s) => a + s.duration, 0);
+                  return (
+                    <div key={i} style={{ padding: "10px 8px 8px", borderLeft: `1px solid ${C.line30}` }}>
+                      <div style={{ fontWeight: 600, fontSize: 14 }}>{DAY_NAMES[i]}</div>
+                      {list.length === 0 ? (
+                        <div style={{ fontSize: 11, color: C.muted }}>frei</div>
+                      ) : (
+                        <>
+                          <div style={{ fontSize: 11, color: C.muted }}>
+                            {list.length} {list.length === 1 ? "Einheit" : "Einheiten"}
+                          </div>
+                          <div style={{ fontSize: 11, color: C.muted, fontFamily: MONO, fontVariantNumeric: "tabular-nums" }}>
+                            {fmtDur(mins)}
+                          </div>
+                        </>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+
+              <div style={{ display: "grid", gridTemplateColumns: `56px repeat(${dayCount}, 1fr)`, padding: "12px 0 14px" }}>
+                <div style={{ position: "relative", height: total * PX }}>
+                  {Array.from({ length: settings.endHour - settings.startHour + 1 }, (_, i) => {
+                    const h = settings.startHour + i;
+                    return (
+                      <div key={h} style={{ position: "absolute", right: 8, top: (h * 60 - startMin) * PX, transform: "translateY(-50%)", fontSize: 11, color: C.muted, fontFamily: MONO, fontVariantNumeric: "tabular-nums" }}>
+                        {String(h).padStart(2, "0")}:00
+                      </div>
+                    );
+                  })}
+                </div>
+
+                {visibleDays.map((i) => (
+                  <div
+                    key={i}
+                    ref={(el) => (colRefs.current[i] = el)}
+                    style={{
+                      position: "relative",
+                      height: total * PX,
+                      borderLeft: `1px solid ${C.line30}`,
+                      backgroundImage: [
+                        `repeating-linear-gradient(to bottom, ${C.line60} 0 1px, transparent 1px ${60 * PX}px)`,
+                        `repeating-linear-gradient(to bottom, ${C.line30} 0 1px, transparent 1px ${30 * PX}px)`,
+                        `repeating-linear-gradient(to bottom, ${C.line10} 0 1px, transparent 1px ${10 * PX}px)`,
+                      ].join(","),
+                      backgroundColor: drag && drag.day === i
+                        ? (drag.valid ? (drag.preferred ? "#EDF3EB" : "#F6F8F5") : "#FBF3F3")
+                        : "transparent",
+                    }}
+                  >
+                    {focused && !isPause(focused) && (focused.preferred || []).filter((p) => p.day === i).map((p, k) => {
+                      const top = Math.max(0, (Math.max(startMin, p.from) - startMin) * PX);
+                      const height = (Math.min(endMin, p.to) - Math.max(startMin, p.from)) * PX;
+                      if (height <= 0) return null;
+                      return (
+                        <div key={"pref-" + k} style={{ position: "absolute", left: 0, right: 0, top, height, background: "rgba(63,122,61,0.10)", borderLeft: `3px solid ${PREF.bg}`, pointerEvents: "none", zIndex: 1 }} />
+                      );
+                    })}
+                    {focused && !isPause(focused) && (focused.blocked || []).filter((b) => b.day === i).map((b, k) => {
+                      const top = Math.max(0, (Math.max(startMin, b.from) - startMin) * PX);
+                      const height = (Math.min(endMin, b.to) - Math.max(startMin, b.from)) * PX;
+                      if (height <= 0) return null;
+                      return (
+                        <div key={"blk-" + k} style={{ position: "absolute", left: 0, right: 0, top, height, background: "repeating-linear-gradient(135deg, rgba(178,58,58,0.18) 0 4px, transparent 4px 10px)", borderTop: `1px solid rgba(178,58,58,0.35)`, borderBottom: `1px solid rgba(178,58,58,0.35)`, pointerEvents: "none", zIndex: 2 }} />
+                      );
+                    })}
+
+                    {gaps[i] && gaps[i].map((g, k) => {
+                      const height = g.duration * PX;
+                      if (height < 12) return null;
+                      return (
+                        <div key={"gap-" + k} style={{
+                          position: "absolute",
+                          left: 0, right: 0,
+                          top: (g.start - startMin) * PX,
+                          height: height,
+                          display: "flex",
+                          alignItems: "center",
+                          justifyContent: "center",
+                          pointerEvents: "none",
+                          zIndex: 1,
+                          color: C.muted,
+                          fontSize: 10,
+                          fontFamily: MONO,
+                          fontVariantNumeric: "tabular-nums",
+                          opacity: 0.7,
+                        }}>
+                          {g.duration} min
+                        </div>
+                      );
+                    })}
+
+                    {items.filter((s) => s.day === i).map((s) => {
+                      const info = layouts[i].get(s.id) || { col: 0, totalCols: 1 };
+                      const col = info.col, totalCols = info.totalCols;
+                      const isNarrow = totalCols > 1;
+                      const outer = 4, halfGap = 2;
+                      const leftPct = (col / totalCols) * 100;
+                      const rightPct = ((totalCols - col - 1) / totalCols) * 100;
+                      return (
+                        <div
+                          key={s.id}
+                          className={"sp-block" + (isPause(s) ? " pause" : "")}
+                          title={`${s.name} · ${fmt(s.start)}–${fmt(s.start + s.duration)}`}
+                          {...dragProps(s, true)}
+                          style={Object.assign({}, dragStyle, {
+                            top: (s.start - startMin) * PX + 1,
+                            height: s.duration * PX - 2,
+                            left: `calc(${leftPct}% + ${col === 0 ? outer : halfGap}px)`,
+                            right: `calc(${rightPct}% + ${col === totalCols - 1 ? outer : halfGap}px)`,
+                            background: isPause(s) ? undefined : colorOf(s).bg,
+                            opacity: drag && drag.id === s.id ? 0.3 : 1,
+                          })}
+                        >
+                          {isPause(s) ? (
+                            <div style={{ fontSize: 10, fontFamily: MONO, lineHeight: 1.2, whiteSpace: "nowrap", overflow: "hidden" }}>
+                              {isNarrow ? `${s.duration}m` : `Pause · ${s.duration} min`}
+                            </div>
+                          ) : (
+                            <>
+                              <div style={{ fontSize: 12, fontWeight: 600, lineHeight: 1.2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{s.name}</div>
+                              <div style={{ fontSize: 10, opacity: 0.85, fontFamily: MONO, lineHeight: 1.2, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                                {isNarrow ? `${fmt(s.start)} · ${s.duration}m` : `${fmt(s.start)}–${fmt(s.start + s.duration)} · ${s.duration} min`}
+                              </div>
+                            </>
+                          )}
+                        </div>
+                      );
+                    })}
+
+                    {zones[i] && zones[i].map((z, k) => (
+                      <div key={"gr-" + k} style={{
+                        position: "absolute", left: 0, right: 0,
+                        top: (z.start - startMin) * PX,
+                        height: (z.end - z.start) * PX,
+                        background: "repeating-linear-gradient(45deg, rgba(0,0,0,0.05) 0 3px, transparent 3px 9px)",
+                        borderTop: "1px dashed rgba(0,0,0,0.3)",
+                        borderBottom: "1px dashed rgba(0,0,0,0.3)",
+                        pointerEvents: "none", zIndex: 5,
+                      }} />
+                    ))}
+
+                    {drag && drag.day === i && dragged && (
+                      <div
+                        style={{
+                          position: "absolute", left: 4, right: 4, pointerEvents: "none", boxSizing: "border-box",
+                          top: (drag.start - startMin) * PX + 1,
+                          height: dragged.duration * PX - 2,
+                          borderRadius: 5, padding: "3px 7px", overflow: "hidden", zIndex: 6,
+                          border: `2px dashed ${drag.valid ? colorOf(dragged).bg : C.danger}`,
+                          background: drag.valid ? colorOf(dragged).soft : C.dangerSoft,
+                          color: drag.valid ? (isPause(dragged) ? C.muted : colorOf(dragged).bg) : C.danger,
+                        }}
+                      >
+                        <div style={{ fontSize: 12, fontWeight: 600, lineHeight: 1.2, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                          {drag.valid
+                            ? `${drag.preferred ? "★ " : ""}${dragged.name}${drag.overlapWith && drag.overlapWith.length ? ` · Gruppe (${drag.overlapWith[0].mins} min)` : ""}`
+                            : drag.reason}
+                        </div>
+                        <div style={{ fontSize: 10, fontFamily: MONO, lineHeight: 1.2 }}>{fmt(drag.start)}–{fmt(drag.start + dragged.duration)}</div>
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+          <p style={{ fontSize: 12, color: C.muted, margin: "10px 2px 0" }}>
+            SchülerInnen und Pausen aus der Liste in den Plan ziehen. Über <span aria-hidden>▾</span> pro SchülerIn Sperr- und Wunschzeiten festlegen. Raster: 5 Minuten.
+            {settings.maxOverlap > 0 && ` · Bis zu ${settings.maxOverlap} min Überlappung als Gruppenunterricht möglich.`}
+          </p>
+        </main>
+      </div>
+
+      {drag && drag.day === null && dragged && (
+        <div style={{ position: "fixed", left: drag.x + 12, top: drag.y + 12, pointerEvents: "none", zIndex: 50, background: drag.fromGrid ? C.dangerSoft : colorOf(dragged).bg, color: drag.fromGrid ? C.danger : "#fff", border: drag.fromGrid ? `1px solid ${C.danger}` : "none", padding: "5px 10px", borderRadius: 6, fontSize: 12, fontWeight: 600, boxShadow: "0 2px 8px rgba(0,0,0,.2)", whiteSpace: "nowrap" }}>
+          {drag.fromGrid ? `${dragged.name} aus dem Plan nehmen` : `${dragged.name} · ${dragged.duration} min`}
+        </div>
+      )}
+
+      {exportText && (
+        <div style={{ position: "fixed", inset: 0, background: "rgba(30,40,55,0.5)", zIndex: 100, display: "flex", alignItems: "center", justifyContent: "center", padding: 20 }} onClick={() => setExportText(null)}>
+          <div onClick={(e) => e.stopPropagation()} style={{ background: C.paper, border: `1px solid ${C.border}`, borderRadius: 10, padding: 18, maxWidth: 560, width: "100%", maxHeight: "80vh", display: "flex", flexDirection: "column" }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 8 }}>
+              <h2 style={{ fontFamily: SERIF, fontStyle: "italic", fontWeight: 400, margin: 0, fontSize: 20 }}>
+                {exportText.kind === "ics" ? "Kalender-Datei" : "Export"}
+              </h2>
+              <button onClick={() => setExportText(null)} className="sp-x" style={{ fontSize: 20 }}>×</button>
+            </div>
+            <p style={{ fontSize: 12, color: C.muted, margin: "0 0 10px" }}>
+              Kopiere den Text und speichere ihn als <code style={{ fontFamily: MONO }}>{exportText.filename}</code>
+              {exportText.kind === "ics" ? " zum Import in Google Kalender." : "."}
+            </p>
+            <textarea readOnly value={exportText.text} style={{ flex: 1, minHeight: 200, fontFamily: MONO, fontSize: 11, padding: 8, border: `1px solid ${C.border}`, borderRadius: 5, resize: "vertical", background: "#F7F7F5" }} onFocus={(e) => e.target.select()} />
+            <div style={{ display: "flex", gap: 6, marginTop: 10 }}>
+              <button className="sp-btn" onClick={copyToClipboard} style={{ fontWeight: 600 }}>{exportText.copied ? "Kopiert ✓" : "In Zwischenablage kopieren"}</button>
+              <button className="sp-btn" onClick={() => setExportText(null)}>Schließen</button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function TimePicker({ mins, onChange, startHour, endHour }) {
+  const clamped = Math.max(startHour * 60, Math.min(endHour * 60, mins));
+  const h = Math.floor(clamped / 60);
+  const m = clamped % 60;
+  const hours = [];
+  for (let i = startHour; i <= endHour; i++) hours.push(i);
+  const minutes = [];
+  for (let i = 0; i < 60; i += 5) minutes.push(i);
+  return (
+    <span style={{ display: "inline-flex", alignItems: "center", gap: 1 }}>
+      <select value={h} onChange={(e) => onChange(+e.target.value * 60 + m)} className="sp-tp" aria-label="Stunde">
+        {hours.map((hh) => <option key={hh} value={hh}>{String(hh).padStart(2, "0")}</option>)}
+      </select>
+      <span style={{ fontFamily: MONO, color: C.muted, fontSize: 12, padding: "0 1px" }}>:</span>
+      <select value={m} onChange={(e) => onChange(h * 60 + +e.target.value)} className="sp-tp" aria-label="Minute">
+        {minutes.map((mm) => <option key={mm} value={mm}>{String(mm).padStart(2, "0")}</option>)}
+      </select>
+    </span>
+  );
+}
+
+function AvailEditor({ s, addAvail, removeAvail, visibleDays, startHour, endHour }) {
+  const [tab, setTab] = useState("blocked");
+  const [day, setDay] = useState(visibleDays[0] != null ? visibleDays[0] : 0);
+  const [from, setFrom] = useState(startHour * 60);
+  const [to, setTo] = useState(Math.min((startHour + 1) * 60, endHour * 60));
+  const [err, setErr] = useState("");
+
+  useEffect(() => {
+    if (visibleDays.length && !visibleDays.includes(day)) setDay(visibleDays[0]);
+  }, [visibleDays, day]);
+
+  useEffect(() => {
+    const sMin = startHour * 60, eMin = endHour * 60;
+    setFrom((f) => Math.max(sMin, Math.min(eMin - 5, f - (f % 5))));
+    setTo((t) => Math.max(sMin + 5, Math.min(eMin, t - (t % 5))));
+  }, [startHour, endHour]);
+
+  const list = tab === "blocked" ? (s.blocked || []) : (s.preferred || []);
+  const isBlk = tab === "blocked";
+  const accent = isBlk ? C.danger : PREF.bg;
+  const accentSoft = isBlk ? C.dangerSoft : PREF.soft;
+
+  const submit = () => {
+    if (from >= to) { setErr("Endzeit muss nach der Startzeit liegen"); return; }
+    setErr("");
+    addAvail(s.id, tab, day, from, to);
+  };
+
+  return (
+    <div
+      onPointerDown={(e) => e.stopPropagation()}
+      style={{ background: "#F7F7F5", border: `1px solid ${C.border}`, borderTop: "none", borderRadius: "0 0 8px 8px", padding: 10 }}
+    >
+      <div style={{ display: "flex", gap: 4, marginBottom: 8 }}>
+        {[
+          { id: "blocked", label: "Sperrzeiten", color: C.danger, count: (s.blocked || []).length },
+          { id: "preferred", label: "Wunschzeiten", color: PREF.bg, count: (s.preferred || []).length },
+        ].map((t) => {
+          const active = tab === t.id;
+          return (
+            <button
+              key={t.id}
+              onClick={() => { setTab(t.id); setErr(""); }}
+              style={{
+                flex: 1,
+                border: `1px solid ${active ? t.color : C.border}`,
+                background: active ? t.color : C.paper,
+                color: active ? "#fff" : C.ink,
+                borderRadius: 5, padding: "5px 8px", fontSize: 12, fontWeight: 600,
+                cursor: "pointer", fontFamily: "inherit",
+              }}
+            >
+              {t.label} · {t.count}
+            </button>
+          );
+        })}
+      </div>
+
+      {list.length === 0 ? (
+        <div style={{ fontSize: 12, color: C.muted, padding: "2px 0 8px" }}>
+          {isBlk ? "Keine Sperrzeiten" : "Keine Wunschzeiten"}
+        </div>
+      ) : (
+        <div style={{ marginBottom: 8 }}>
+          {list.map((e, idx) => (
+            <div key={idx} style={{
+              display: "flex", alignItems: "center", gap: 6,
+              padding: "3px 8px", background: accentSoft, color: accent,
+              borderRadius: 4, marginBottom: 3, fontSize: 12,
+            }}>
+              <span style={{ flex: 1, fontFamily: MONO, fontVariantNumeric: "tabular-nums" }}>
+                {DAY_SHORT[e.day]} · {fmt(e.from)}–{fmt(e.to)}
+              </span>
+              <button
+                onClick={() => removeAvail(s.id, tab, idx)}
+                aria-label="Entfernen"
+                style={{ border: "none", background: "none", color: accent, cursor: "pointer", padding: "0 4px", fontSize: 15, lineHeight: 1 }}
+              >×</button>
+            </div>
+          ))}
+        </div>
+      )}
+
+      <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
+        <select value={day} onChange={(e) => setDay(+e.target.value)} className="sp-av-input" aria-label="Wochentag">
+          {visibleDays.map((i) => <option key={i} value={i}>{DAY_SHORT[i]}</option>)}
+        </select>
+        <TimePicker mins={from} onChange={(v) => { setFrom(v); setErr(""); }} startHour={startHour} endHour={endHour} />
+        <span style={{ color: C.muted, fontSize: 12 }}>–</span>
+        <TimePicker mins={to} onChange={(v) => { setTo(v); setErr(""); }} startHour={startHour} endHour={endHour} />
+        <button
+          onClick={submit}
+          style={{
+            border: `1px solid ${accent}`, background: accent, color: "#fff",
+            borderRadius: 5, padding: "4px 12px", fontSize: 13, fontWeight: 600,
+            cursor: "pointer", fontFamily: "inherit", marginLeft: "auto",
+          }}
+          title={isBlk ? "Sperrzeit hinzufügen" : "Wunschzeit hinzufügen"}
+        >Hinzufügen</button>
+      </div>
+      {err && <div style={{ fontSize: 11, color: C.danger, marginTop: 6 }}>{err}</div>}
+    </div>
+  );
+}
+
+function ItemControls({ s, onDur, confirmDel, setConfirmDel, onDelete, onUnschedule }) {
+  const stop = { onPointerDown: (e) => e.stopPropagation() };
+  const durs = isPause(s) ? PAUSE_DURS : STUDENT_DURS;
+  if (confirmDel === s.id) {
+    return (
+      <span style={{ display: "flex", gap: 4, alignItems: "center", fontSize: 12 }} {...stop}>
+        <button className="sp-btn" style={{ color: C.danger, padding: "3px 7px", fontSize: 12 }} onClick={onDelete}>Löschen</button>
+        <button className="sp-btn" style={{ padding: "3px 7px", fontSize: 12 }} onClick={() => setConfirmDel(null)}>Nein</button>
+      </span>
+    );
+  }
+  return (
+    <span style={{ display: "flex", gap: 4, alignItems: "center" }} {...stop}>
+      <select className="sp-sel" value={s.duration} onChange={(e) => onDur(s, +e.target.value)} aria-label="Dauer">
+        {durs.map((d) => <option key={d} value={d}>{d} min</option>)}
+      </select>
+      {onUnschedule && (
+        <button className="sp-x" title="Aus dem Plan nehmen" aria-label="Aus dem Plan nehmen" onClick={onUnschedule} style={{ fontSize: 13 }}>↩</button>
+      )}
+      <button className="sp-x" title="Löschen" aria-label="Löschen" onClick={() => setConfirmDel(s.id)}>×</button>
+    </span>
+  );
+}
+
+const root = ReactDOM.createRoot(document.getElementById("root"));
+root.render(React.createElement(Stundenplan));
+</script>
+</body>
+</html>
