@@ -46,7 +46,7 @@ const FILE_VERSION = 1;
 const DAY_NAMES = ["Montag", "Dienstag", "Mittwoch", "Donnerstag", "Freitag", "Samstag"];
 const DAY_SHORT = ["Mo", "Di", "Mi", "Do", "Fr", "Sa"];
 const WEEKDAY_ICAL = ["MO", "TU", "WE", "TH", "FR", "SA"];
-const PX = 1.8;
+const PX = 1.5;
 const STEP = 5;
 const STUDENT_DURS = [30, 40, 50];
 const PAUSE_DURS = [5, 10, 15, 20, 30];
@@ -176,7 +176,7 @@ const findGaps = (dayItems) => {
   return gaps;
 };
 
-const DEFAULT_SETTINGS = { startHour: 12, endHour: 19, days: [true, true, true, true, true, false], maxOverlap: 10, holidays: [] };
+const DEFAULT_SETTINGS = { startHour: 9, endHour: 19, days: [true, true, true, true, true, false], maxOverlap: 10, holidays: [] };
 
 // ── iCalendar (.ics) Helpers ──────────────────────────────────────────────────
 const pad2 = (n) => String(n).padStart(2, "0");
@@ -449,6 +449,9 @@ const parseImport = (raw) => {
       preferred: type === "student" ? (Array.isArray(s.preferred) ? s.preferred : []).filter(validSpan).map((p) => ({ day: p.day, from: p.from, to: p.to })) : [],
       members: type === "ensemble" ? (Array.isArray(s.members) ? s.members.filter((id) => typeof id === "string") : []) : [],
       dates: type === "ensemble" ? (Array.isArray(s.dates) ? s.dates.filter((d) => typeof d === "string" && /^\d{4}-\d{2}-\d{2}$/.test(d)).sort() : []) : [],
+      lernjahr: type === "student" && typeof s.lernjahr === "number" && s.lernjahr >= 1 && s.lernjahr <= 30 ? s.lernjahr : null,
+      schulstufe: type === "student" && typeof s.schulstufe === "number" && s.schulstufe >= 1 && s.schulstufe <= 13 ? s.schulstufe : null,
+      schulstufeSince: type === "student" && typeof s.schulstufeSince === "string" && /^\d{4}-\d{2}-\d{2}$/.test(s.schulstufeSince) ? s.schulstufeSince : null,
     };
   });
   let settings = Object.assign({}, DEFAULT_SETTINGS);
@@ -493,6 +496,7 @@ function Stundenplan() {
   const [icalEnd, setIcalEnd] = useState(defaultIcalEnd);
   const [icalMsg, setIcalMsg] = useState(null);
   const [showAllHolidays, setShowAllHolidays] = useState(false);
+  const [blockHover, setBlockHover] = useState(null);
   const dragRef = useRef(null);
   const colRefs = useRef([]);
   const nameRef = useRef(null);
@@ -535,7 +539,7 @@ function Stundenplan() {
   const addStudent = () => {
     const n = name.trim();
     if (!n) return;
-    setItems((list) => [...list, { id: uid(), type: "student", name: n, duration: dur, day: null, start: null, blocked: [], preferred: [] }]);
+    setItems((list) => [...list, { id: uid(), type: "student", name: n, duration: dur, day: null, start: null, blocked: [], preferred: [], lernjahr: null, schulstufe: null, schulstufeSince: null }]);
     setName("");
     nameRef.current && nameRef.current.focus();
   };
@@ -835,7 +839,12 @@ function Stundenplan() {
           <span style={{ flex: 1, minWidth: 0 }}>
             <span style={{ display: "block", fontSize: 14, fontWeight: isPause(s) ? 400 : 500, color: isPause(s) ? C.muted : C.ink, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{s.name}</span>
             {s.day !== null && (
-              <span style={{ fontSize: 11, color: C.muted, fontFamily: MONO }}>{DAY_SHORT[s.day]} {fmt(s.start)}–{fmt(s.start + s.duration)}</span>
+              <span style={{ display: "block", fontSize: 11, color: C.muted, fontFamily: MONO }}>{DAY_SHORT[s.day]} {fmt(s.start)}–{fmt(s.start + s.duration)}</span>
+            )}
+            {s.type === "student" && (s.lernjahr || s.schulstufe) && (
+              <span style={{ display: "block", fontSize: 10, color: C.muted }}>
+                {[s.lernjahr && `${s.lernjahr}. Lernjahr`, s.schulstufe && `${s.schulstufe}. Stufe`].filter(Boolean).join(" · ")}
+              </span>
             )}
           </span>
           {!isPause(s) && (
@@ -870,7 +879,7 @@ function Stundenplan() {
           />
         </div>
         {isExp && s.type === "student" && (
-          <AvailEditor s={s} addAvail={addAvail} removeAvail={removeAvail} visibleDays={visibleDays} startHour={settings.startHour} endHour={settings.endHour} />
+          <AvailEditor s={s} addAvail={addAvail} removeAvail={removeAvail} update={update} visibleDays={visibleDays} startHour={settings.startHour} endHour={settings.endHour} />
         )}
         {isExp && s.type === "ensemble" && (
           <EnsembleEditor s={s} allStudents={items.filter((x) => x.type === "student")} updateMembers={updateEnsembleMembers} addDate={addEnsembleDate} removeDate={removeEnsembleDate} />
@@ -912,6 +921,14 @@ function Stundenplan() {
         .sp-tp { border: 1px solid ${C.border}; background: ${C.paper}; border-radius: 5px; padding: 3px 4px; font-size: 12px; font-family: ${MONO}; font-variant-numeric: tabular-nums; color: ${C.ink}; cursor: pointer; }
         .sp-mini { border: 1px solid ${C.border}; background: ${C.paper}; color: ${C.muted}; border-radius: 4px; padding: 2px 6px; font-size: 11px; cursor: pointer; font-family: inherit; }
         .sp-mini:hover { border-color: ${C.line60}; color: ${C.ink}; }
+        .sp-block-popup {
+          position: fixed;
+          min-width: 220px; max-width: 300px;
+          background: ${C.paper}; border: 1px solid ${C.border}; border-radius: 8px;
+          padding: 10px 12px; font-size: 12px; color: ${C.ink}; line-height: 1.4;
+          z-index: 200; pointer-events: none;
+          box-shadow: 0 4px 14px rgba(0,0,0,0.14);
+        }
         @media (prefers-reduced-motion: no-preference) { .sp-block { transition: opacity .15s; } }
       `}</style>
 
@@ -1102,9 +1119,9 @@ function Stundenplan() {
             <div style={{ fontSize: 11, textTransform: "uppercase", letterSpacing: "0.08em", color: C.muted, marginTop: 18, marginBottom: 8 }}>Google Kalender</div>
             <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 10, flexWrap: "wrap", fontSize: 12 }}>
               <span>Schuljahr</span>
-              <input type="date" value={icalStart} onChange={(e) => { setIcalStart(e.target.value); setIcalMsg(null); }} className="sp-input" style={{ width: 138, padding: "4px 6px", fontSize: 12 }} aria-label="Schuljahr-Beginn" />
+              <DateInput value={icalStart} onChange={(v) => { setIcalStart(v); setIcalMsg(null); }} className="sp-input" style={{ width: 120, padding: "4px 6px", fontSize: 12, fontFamily: MONO, fontVariantNumeric: "tabular-nums" }} aria-label="Schuljahr-Beginn" />
               <span>bis</span>
-              <input type="date" value={icalEnd} onChange={(e) => { setIcalEnd(e.target.value); setIcalMsg(null); }} className="sp-input" style={{ width: 138, padding: "4px 6px", fontSize: 12 }} aria-label="Schuljahr-Ende" />
+              <DateInput value={icalEnd} onChange={(v) => { setIcalEnd(v); setIcalMsg(null); }} className="sp-input" style={{ width: 120, padding: "4px 6px", fontSize: 12, fontFamily: MONO, fontVariantNumeric: "tabular-nums" }} aria-label="Schuljahr-Ende" />
             </div>
 
             <div style={{ fontSize: 11, color: C.muted, marginBottom: 4 }}>Ferien (optional)</div>
@@ -1310,7 +1327,9 @@ function Stundenplan() {
                       const col = info.col, totalCols = info.totalCols;
                       const isNarrow = totalCols > 1;
                       const blockHeight = s.duration * PX;
-                      const isTiny = blockHeight < 26 && !isPause(s);
+                      const isTiny = blockHeight < 32 && !isPause(s);
+                      const isTinyPause = isPause(s) && blockHeight < 22;
+                      const isVeryTinyPause = isPause(s) && blockHeight < 12;
                       const outer = 4, halfGap = 2;
                       const leftPct = (col / totalCols) * 100;
                       const rightPct = ((totalCols - col - 1) / totalCols) * 100;
@@ -1318,8 +1337,18 @@ function Stundenplan() {
                         <div
                           key={s.id}
                           className={"sp-block" + (isPause(s) ? " pause" : "")}
-                          title={`${s.name} · ${fmt(s.start)}–${fmt(s.start + s.duration)}`}
+                          title={s.type === "student" ? undefined : `${s.name} · ${fmt(s.start)}–${fmt(s.start + s.duration)}`}
                           {...dragProps(s, true)}
+                          onMouseEnter={s.type === "student" ? (e) => {
+                            if (dragRef.current) return;
+                            const rect = e.currentTarget.getBoundingClientRect();
+                            const popupWidth = 280;
+                            const overflowsRight = rect.right + 10 + popupWidth > window.innerWidth;
+                            const x = overflowsRight ? Math.max(10, rect.left - popupWidth - 10) : rect.right + 10;
+                            const y = Math.max(10, Math.min(rect.top, window.innerHeight - 250));
+                            setBlockHover({ id: s.id, x, y });
+                          } : undefined}
+                          onMouseLeave={s.type === "student" ? () => setBlockHover(null) : undefined}
                           style={Object.assign({}, dragStyle, {
                             top: (s.start - startMin) * PX + 1,
                             height: s.duration * PX - 2,
@@ -1327,12 +1356,14 @@ function Stundenplan() {
                             right: `calc(${rightPct}% + ${col === totalCols - 1 ? outer : halfGap}px)`,
                             background: isPause(s) ? undefined : colorOf(s).bg,
                             opacity: drag && drag.id === s.id ? 0.3 : 1,
-                          }, isTiny ? { padding: "1px 6px" } : {})}
+                          }, isVeryTinyPause ? { padding: 0 } : (isTinyPause ? { padding: "0 6px" } : (isTiny ? { padding: "1px 6px" } : {})))}
                         >
                           {isPause(s) ? (
-                            <div style={{ fontSize: 10, fontFamily: MONO, lineHeight: 1.2, whiteSpace: "nowrap", overflow: "hidden" }}>
-                              {isNarrow ? `${s.duration}m` : `Pause · ${s.duration} min`}
-                            </div>
+                            isVeryTinyPause ? null : (
+                              <div style={{ fontSize: isTinyPause ? 9 : 10, fontFamily: MONO, lineHeight: 1.1, whiteSpace: "nowrap", overflow: "hidden" }}>
+                                {isNarrow || isTinyPause ? `${s.duration}m` : `Pause · ${s.duration} min`}
+                              </div>
+                            )
                           ) : isTiny ? (
                             <div style={{
                               fontSize: 11, fontWeight: 600, lineHeight: 1,
@@ -1435,6 +1466,46 @@ function Stundenplan() {
           </div>
         </div>
       )}
+      {blockHover && !drag && (() => {
+        const hs = items.find((x) => x.id === blockHover.id);
+        if (!hs || hs.type !== "student") return null;
+        return (
+          <div className="sp-block-popup" style={{ left: blockHover.x, top: blockHover.y }}>
+            <div style={{ fontFamily: SERIF, fontStyle: "italic", fontWeight: 400, fontSize: 16, marginBottom: 6 }}>{hs.name}</div>
+            <div style={{ fontSize: 11, color: C.muted, marginBottom: 8 }}>
+              <span style={{ display: "inline-block", width: 8, height: 8, borderRadius: 2, background: colorOf(hs).bg, marginRight: 5, verticalAlign: "middle" }} />
+              {hs.duration} min Unterrichtseinheit
+            </div>
+            {hs.day !== null ? (
+              <div style={{ marginBottom: 4 }}>
+                <span style={{ color: C.muted }}>Termin: </span>
+                <span style={{ fontFamily: MONO, fontVariantNumeric: "tabular-nums" }}>{DAY_NAMES[hs.day]} {fmt(hs.start)}–{fmt(hs.start + hs.duration)}</span>
+              </div>
+            ) : (
+              <div style={{ marginBottom: 4, fontStyle: "italic", color: C.muted }}>Noch nicht eingeplant</div>
+            )}
+            {hs.lernjahr && (
+              <div style={{ marginBottom: 2 }}>
+                <span style={{ color: C.muted }}>Lernjahr: </span>{hs.lernjahr}
+              </div>
+            )}
+            {hs.schulstufe && (
+              <div style={{ marginBottom: 2 }}>
+                <span style={{ color: C.muted }}>Schulstufe: </span>{hs.schulstufe}
+                {hs.schulstufeSince && (
+                  <span style={{ color: C.muted, fontSize: 11 }}> seit {formatGermanDate(hs.schulstufeSince)}</span>
+                )}
+              </div>
+            )}
+            {((hs.blocked || []).length > 0 || (hs.preferred || []).length > 0) && (
+              <div style={{ fontSize: 11, color: C.muted, marginTop: 8, paddingTop: 6, borderTop: `1px solid ${C.line10}` }}>
+                {(hs.blocked || []).length > 0 && <div>{(hs.blocked || []).length} Sperrzeit{(hs.blocked || []).length === 1 ? "" : "en"}</div>}
+                {(hs.preferred || []).length > 0 && <div>{(hs.preferred || []).length} Wunschzeit{(hs.preferred || []).length === 1 ? "" : "en"}</div>}
+              </div>
+            )}
+          </div>
+        );
+      })()}
     </div>
   );
 }
@@ -1460,7 +1531,47 @@ function TimePicker({ mins, onChange, startHour, endHour }) {
   );
 }
 
-function AvailEditor({ s, addAvail, removeAvail, visibleDays, startHour, endHour }) {
+function DateInput({ value, onChange, style, className, ...rest }) {
+  const displayValue = value ? formatGermanDate(value) : "";
+  const [text, setText] = useState(displayValue);
+
+  useEffect(() => { setText(displayValue); }, [displayValue]);
+
+  const commit = (t) => {
+    if (!t.trim()) { onChange(""); setText(""); return; }
+    const m = t.match(/^\s*(\d{1,2})\.(\d{1,2})\.(\d{2,4})\s*$/);
+    if (m) {
+      let year = m[3];
+      if (year.length === 2) year = "20" + year;
+      const day = m[1].padStart(2, "0");
+      const month = m[2].padStart(2, "0");
+      const ymd = `${year}-${month}-${day}`;
+      if (parseYmd(ymd)) {
+        onChange(ymd);
+        setText(formatGermanDate(ymd));
+        return;
+      }
+    }
+    setText(displayValue);
+  };
+
+  return (
+    <input
+      type="text"
+      value={text}
+      onChange={(e) => setText(e.target.value)}
+      onBlur={(e) => commit(e.target.value)}
+      onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); commit(e.currentTarget.value); } }}
+      placeholder="TT.MM.JJJJ"
+      inputMode="numeric"
+      style={style}
+      className={className}
+      {...rest}
+    />
+  );
+}
+
+function AvailEditor({ s, addAvail, removeAvail, update, visibleDays, startHour, endHour }) {
   const [tab, setTab] = useState("blocked");
   const [day, setDay] = useState(visibleDays[0] != null ? visibleDays[0] : 0);
   const [from, setFrom] = useState(startHour * 60);
@@ -1488,11 +1599,51 @@ function AvailEditor({ s, addAvail, removeAvail, visibleDays, startHour, endHour
     addAvail(s.id, tab, day, from, to);
   };
 
+  const setLernjahr = (v) => update(s.id, { lernjahr: v === "" ? null : Math.max(1, Math.min(30, +v)) });
+  const setSchulstufe = (v) => update(s.id, { schulstufe: v === "" ? null : Math.max(1, Math.min(13, +v)) });
+  const setSchulstufeSince = (v) => update(s.id, { schulstufeSince: v || null });
+
   return (
     <div
       onPointerDown={(e) => e.stopPropagation()}
       style={{ background: "#F7F7F5", border: `1px solid ${C.border}`, borderTop: "none", borderRadius: "0 0 8px 8px", padding: 10 }}
     >
+      {/* SchülerIn-Info */}
+      <div style={{ fontSize: 11, textTransform: "uppercase", letterSpacing: "0.08em", color: C.muted, marginBottom: 6 }}>
+        SchülerIn-Info
+      </div>
+      <div style={{ display: "flex", gap: 6, alignItems: "center", marginBottom: 6, fontSize: 12, flexWrap: "wrap" }}>
+        <span>Lernjahr</span>
+        <input
+          type="number" min={1} max={30}
+          value={s.lernjahr != null ? s.lernjahr : ""}
+          onChange={(e) => setLernjahr(e.target.value)}
+          className="sp-av-input"
+          style={{ width: 50, fontSize: 12 }}
+          aria-label="Lernjahr"
+        />
+        <span style={{ marginLeft: 4 }}>Schulstufe</span>
+        <input
+          type="number" min={1} max={13}
+          value={s.schulstufe != null ? s.schulstufe : ""}
+          onChange={(e) => setSchulstufe(e.target.value)}
+          className="sp-av-input"
+          style={{ width: 50, fontSize: 12 }}
+          aria-label="Schulstufe"
+        />
+      </div>
+      <div style={{ display: "flex", gap: 6, alignItems: "center", marginBottom: 12, fontSize: 12 }}>
+        <span>Stufe seit</span>
+        <DateInput
+          value={s.schulstufeSince || ""}
+          onChange={setSchulstufeSince}
+          className="sp-av-input"
+          style={{ fontSize: 12, flex: 1, fontFamily: MONO, fontVariantNumeric: "tabular-nums" }}
+          aria-label="In aktueller Schulstufe seit"
+        />
+      </div>
+
+      {/* Reiter */}
       <div style={{ display: "flex", gap: 4, marginBottom: 8 }}>
         {[
           { id: "blocked", label: "Sperrzeiten", color: C.danger, count: (s.blocked || []).length },
@@ -1638,12 +1789,11 @@ function EnsembleEditor({ s, allStudents, updateMembers, addDate, removeDate }) 
       )}
 
       <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
-        <input
-          type="date"
+        <DateInput
           value={datePick}
-          onChange={(e) => { setDatePick(e.target.value); setErr(""); }}
+          onChange={(v) => { setDatePick(v); setErr(""); }}
           className="sp-av-input"
-          style={{ flex: 1, fontSize: 12 }}
+          style={{ flex: 1, fontSize: 12, fontFamily: MONO, fontVariantNumeric: "tabular-nums" }}
           aria-label="Neues Termin-Datum"
         />
         <button
