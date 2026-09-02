@@ -1218,29 +1218,26 @@ function Stundenplan() {
               <div style={{ display: "grid", gridTemplateColumns: `56px repeat(${dayCount}, 1fr)`, borderBottom: `1px solid ${C.line60}` }}>
                 <div />
                 {visibleDays.map((i) => {
-                  const list = items.filter((s) => s.day === i && s.type === "student");
+                  const students = items.filter((s) => s.day === i && s.type === "student");
                   const ensembles = items.filter((s) => s.day === i && s.type === "ensemble");
-                  const mins = list.reduce((a, s) => a + s.duration, 0);
+                  const totalCount = students.length + ensembles.length;
+                  const totalMins = students.reduce((a, s) => a + s.duration, 0) + ensembles.reduce((a, s) => a + s.duration, 0);
                   return (
                     <div key={i} style={{ padding: "10px 8px 8px", borderLeft: `1px solid ${C.line30}` }}>
                       <div style={{ fontWeight: 600, fontSize: 14 }}>{DAY_NAMES[i]}</div>
-                      {list.length === 0 && ensembles.length === 0 ? (
+                      {totalCount === 0 ? (
                         <div style={{ fontSize: 11, color: C.muted }}>frei</div>
                       ) : (
                         <>
-                          {list.length > 0 && (
-                            <>
-                              <div style={{ fontSize: 11, color: C.muted }}>
-                                {list.length} {list.length === 1 ? "Einheit" : "Einheiten"}
-                              </div>
-                              <div style={{ fontSize: 11, color: C.muted, fontFamily: MONO, fontVariantNumeric: "tabular-nums" }}>
-                                {fmtDur(mins)}
-                              </div>
-                            </>
-                          )}
+                          <div style={{ fontSize: 11, color: C.muted }}>
+                            {totalCount} {totalCount === 1 ? "Einheit" : "Einheiten"}
+                          </div>
+                          <div style={{ fontSize: 11, color: C.muted, fontFamily: MONO, fontVariantNumeric: "tabular-nums" }}>
+                            {fmtDur(totalMins)}
+                          </div>
                           {ensembles.length > 0 && (
-                            <div style={{ fontSize: 11, color: ENSEMBLE.bg, marginTop: list.length > 0 ? 2 : 0 }}>
-                              + {ensembles.length} Ensemble{ensembles.length === 1 ? "" : "s"}
+                            <div style={{ fontSize: 11, color: ENSEMBLE.bg, marginTop: 2 }}>
+                              davon {ensembles.length} Ensemble{ensembles.length === 1 ? "" : "s"}
                             </div>
                           )}
                         </>
