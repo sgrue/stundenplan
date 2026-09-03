@@ -527,6 +527,14 @@ function Stundenplan() {
     catch (e) { console.error("Speichern fehlgeschlagen", e); }
   }, [items, settings, loaded]);
 
+  useEffect(() => {
+    if (!expandedId) return;
+    const el = document.querySelector(`[data-item-id="${expandedId}"]`);
+    if (el && el.scrollIntoView) {
+      el.scrollIntoView({ behavior: "smooth", block: "nearest" });
+    }
+  }, [expandedId]);
+
   const update = (id, patch) => setItems((list) => list.map((s) => (s.id === id ? Object.assign({}, s, patch) : s)));
   const remove = (id) => {
     if (expandedId === id) setExpandedId(null);
@@ -787,7 +795,16 @@ function Stundenplan() {
     const d = dragRef.current;
     dragRef.current = null;
     setDrag(null);
-    if (!d || !d.moved || !d.preview) return;
+    if (!d) return;
+    // Klick (ohne Bewegung) auf einen Grid-Block öffnet den Editor links
+    if (!d.moved && d.fromGrid) {
+      const s = items.find((x) => x.id === d.id);
+      if (s && (s.type === "student" || s.type === "ensemble")) {
+        setExpandedId((prev) => (prev === s.id ? null : s.id));
+      }
+      return;
+    }
+    if (!d.moved || !d.preview) return;
     const p = d.preview;
     if (p.day !== null && p.valid) update(d.id, { day: p.day, start: p.start });
     else if (p.day === null && d.fromGrid) update(d.id, { day: null, start: null });
@@ -829,7 +846,7 @@ function Stundenplan() {
     const hasBlk = (s.blocked || []).length > 0;
     const hasPref = (s.preferred || []).length > 0;
     return (
-      <div key={s.id} style={{ marginBottom: 6 }}>
+      <div key={s.id} data-item-id={s.id} style={{ marginBottom: 6 }}>
         <div
           className={"sp-card draggable" + (isExp ? " expanded" : "")}
           {...dragProps(s, s.day !== null)}
