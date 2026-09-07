@@ -43,6 +43,8 @@ const { useState, useRef, useEffect } = React;
 const KEY = "stundenplan:v1";
 const APP_ID = "stundenplan";
 const FILE_VERSION = 1;
+const APP_VERSION = "1.1";
+const APP_BUILD = "07.09.2026";
 const DAY_NAMES = ["Montag", "Dienstag", "Mittwoch", "Donnerstag", "Freitag", "Samstag"];
 const DAY_SHORT = ["Mo", "Di", "Mi", "Do", "Fr", "Sa"];
 const WEEKDAY_ICAL = ["MO", "TU", "WE", "TH", "FR", "SA"];
@@ -51,7 +53,7 @@ const STEP = 5;
 const STUDENT_DURS = [30, 40, 50];
 const PAUSE_DURS = [5, 10, 15, 20, 30];
 const ENSEMBLE_DURS = [10, 15, 20, 30, 45, 60, 75, 90, 120, 150, 180];
-const OVERLAP_OPTIONS = [0, 5, 10, 15, 20];
+const OVERLAP_OPTIONS = [0, 5, 10, 15, 20, 25, 30, 40, 50];
 const DUR = {
   30: { bg: "#2F7E7A", soft: "#D6EBEA" },
   40: { bg: "#B7791F", soft: "#F4E6CC" },
@@ -637,7 +639,8 @@ function Stundenplan() {
     // Chrome/Edge/Opera: nativer Speichern-Dialog (Seitenleiste zeigt OneDrive, iCloud etc.)
     if (typeof window.showSaveFilePicker === "function") {
       try {
-        const handle = await window.showSaveFilePicker({ suggestedName: filename });
+        const pickerId = filename.endsWith(".ics") ? "stundenplan-ics" : "stundenplan-json";
+        const handle = await window.showSaveFilePicker({ suggestedName: filename, id: pickerId });
         const writable = await handle.createWritable();
         await writable.write(text);
         await writable.close();
@@ -1222,6 +1225,10 @@ function Stundenplan() {
               ) : (
                 <button className="sp-btn" style={{ color: C.muted }} onClick={() => setConfirmReset(true)}>Alles zurücksetzen</button>
               )}
+            </div>
+
+            <div style={{ marginTop: 20, paddingTop: 12, borderTop: `1px solid ${C.line10}`, fontSize: 10, color: C.muted, textAlign: "center", fontFamily: MONO, fontVariantNumeric: "tabular-nums" }}>
+              v{APP_VERSION} · {APP_BUILD}
             </div>
           </section>
         </aside>
