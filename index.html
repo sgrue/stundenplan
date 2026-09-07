@@ -43,7 +43,7 @@ const { useState, useRef, useEffect } = React;
 const KEY = "stundenplan:v1";
 const APP_ID = "stundenplan";
 const FILE_VERSION = 1;
-const APP_VERSION = "1.1";
+const APP_VERSION = "1.2";
 const APP_BUILD = "07.09.2026";
 const DAY_NAMES = ["Montag", "Dienstag", "Mittwoch", "Donnerstag", "Freitag", "Samstag"];
 const DAY_SHORT = ["Mo", "Di", "Mi", "Do", "Fr", "Sa"];
@@ -636,7 +636,27 @@ function Stundenplan() {
   };
 
   const triggerDownload = async (text, filename, mime) => {
-    // Chrome/Edge/Opera: nativer Speichern-Dialog (Seitenleiste zeigt OneDrive, iCloud etc.)
+    const blob = new Blob([text], { type: mime });
+
+    // Touch-Geräte (Android-Tablet/Handy, iPad): Android-Share-Sheet zeigt OneDrive, Google Drive etc.
+    const isTouchPrimary = typeof window.matchMedia === "function"
+      && window.matchMedia("(pointer: coarse)").matches
+      && window.matchMedia("(hover: none)").matches;
+
+    if (isTouchPrimary && navigator.canShare) {
+      try {
+        const file = new File([blob], filename, { type: mime });
+        if (navigator.canShare({ files: [file] })) {
+          await navigator.share({ files: [file], title: filename });
+          return "saved";
+        }
+      } catch (e) {
+        if (e && e.name === "AbortError") return "cancelled";
+        console.warn("Share fehlgeschlagen (" + (e && e.name) + "), Fallback:", e);
+      }
+    }
+
+    // Desktop (Chrome/Edge/Opera/Brave): nativer Speichern-Dialog
     if (typeof window.showSaveFilePicker === "function") {
       try {
         const pickerId = filename.endsWith(".ics") ? "stundenplan-ics" : "stundenplan-json";
@@ -650,8 +670,8 @@ function Stundenplan() {
         console.warn("Speichern-Dialog fehlgeschlagen (" + (e && e.name) + "), Fallback:", e);
       }
     }
+
     // Firefox/Safari oder Fehler: klassischer Download in den Downloads-Ordner
-    const blob = new Blob([text], { type: mime });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
