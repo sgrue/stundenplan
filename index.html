@@ -633,7 +633,21 @@ function Stundenplan() {
     changeRange({ days });
   };
 
-  const triggerDownload = (text, filename, mime) => {
+  const triggerDownload = async (text, filename, mime) => {
+    // Chrome/Edge/Opera: nativer Speichern-Dialog (Seitenleiste zeigt OneDrive, iCloud etc.)
+    if (typeof window.showSaveFilePicker === "function") {
+      try {
+        const handle = await window.showSaveFilePicker({ suggestedName: filename });
+        const writable = await handle.createWritable();
+        await writable.write(text);
+        await writable.close();
+        return "saved";
+      } catch (e) {
+        if (e && e.name === "AbortError") return "cancelled";
+        console.warn("Speichern-Dialog fehlgeschlagen (" + (e && e.name) + "), Fallback:", e);
+      }
+    }
+    // Firefox/Safari oder Fehler: klassischer Download in den Downloads-Ordner
     const blob = new Blob([text], { type: mime });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
@@ -644,13 +658,14 @@ function Stundenplan() {
     a.click();
     document.body.removeChild(a);
     setTimeout(() => URL.revokeObjectURL(url), 1000);
+    return "downloaded";
   };
 
-  const doExport = () => {
+  const doExport = async () => {
     const data = { app: APP_ID, version: FILE_VERSION, exportedAt: new Date().toISOString(), items, settings };
     const json = JSON.stringify(data, null, 2);
     const filename = "stundenplan-" + new Date().toISOString().slice(0, 10) + ".json";
-    try { triggerDownload(json, filename, "application/json"); }
+    try { await triggerDownload(json, filename, "application/json"); }
     catch (e) { setExportText({ text: json, filename, kind: "json" }); }
   };
 
@@ -725,7 +740,7 @@ function Stundenplan() {
   };
 
   // ── Kalender-Export (.ics) ──
-  const doIcalExport = () => {
+  const doIcalExport = async () => {
     setIcalMsg(null);
     try {
       const result = buildIcs(items, icalStart, icalEnd, holidays);
@@ -739,8 +754,8 @@ function Stundenplan() {
         msg += ` (${result.excludedCount} durch Ferien ausgeklammert)`;
       }
       try {
-        triggerDownload(result.ics, filename, "text/calendar;charset=utf-8");
-        setIcalMsg({ ok: true, text: msg });
+        const res = await triggerDownload(result.ics, filename, "text/calendar;charset=utf-8");
+        if (res !== "cancelled") setIcalMsg({ ok: true, text: msg });
       } catch (e) {
         setExportText({ text: result.ics, filename, kind: "ics" });
       }
@@ -1109,7 +1124,7 @@ function Stundenplan() {
               <button className="sp-btn" onClick={() => fileInputRef.current && fileInputRef.current.click()}>Importieren</button>
               <input type="file" accept=".json,application/json" ref={fileInputRef} onChange={onFile} style={{ display: "none" }} aria-hidden />
             </div>
-            <div style={{ fontSize: 11, color: C.muted, marginTop: 6 }}>Sichert SchülerInnen, Pausen, Verfügbarkeiten und Einstellungen als JSON-Datei. Daten bleiben lokal in deinem Browser.</div>
+            <div style={{ fontSize: 11, color: C.muted, marginTop: 6 }}>Sichert SchülerInnen, Pausen, Verfügbarkeiten und Einstellungen als JSON-Datei. Speicherort frei wählbar (z. B. dein OneDrive-Ordner).</div>
             {importError && (
               <div style={{ fontSize: 12, color: C.danger, marginTop: 8, padding: "6px 8px", background: C.dangerSoft, borderRadius: 5 }}>
                 {importError}
