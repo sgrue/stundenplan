@@ -43,7 +43,7 @@ const { useState, useRef, useEffect } = React;
 const KEY = "stundenplan:v1";
 const APP_ID = "stundenplan";
 const FILE_VERSION = 1;
-const APP_VERSION = "1.6";
+const APP_VERSION = "1.7";
 const APP_BUILD = "07.09.2026";
 const DAY_NAMES = ["Montag", "Dienstag", "Mittwoch", "Donnerstag", "Freitag", "Samstag"];
 const DAY_SHORT = ["Mo", "Di", "Mi", "Do", "Fr", "Sa"];
@@ -718,7 +718,7 @@ function Stundenplan() {
         return;
       }
       await navigator.share({ files: [file], title: filename });
-      setShareInfo({ ok: true, text: "Geteilt als „" + filename + "". Beim Importieren dieselbe .txt-Datei wählen — der Import erkennt sie automatisch." });
+      setShareInfo({ ok: true, text: `Geteilt als ${filename}. Beim Importieren dieselbe .txt-Datei wählen — der Import erkennt sie automatisch.` });
     } catch (e) {
       if (e && e.name === "AbortError") { setShareInfo(null); return; }
       if (e && e.name === "NotAllowedError") {
