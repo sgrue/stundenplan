@@ -43,7 +43,7 @@ const { useState, useRef, useEffect } = React;
 const KEY = "stundenplan:v1";
 const APP_ID = "stundenplan";
 const FILE_VERSION = 1;
-const APP_VERSION = "1.2";
+const APP_VERSION = "1.3";
 const APP_BUILD = "07.09.2026";
 const DAY_NAMES = ["Montag", "Dienstag", "Mittwoch", "Donnerstag", "Freitag", "Samstag"];
 const DAY_SHORT = ["Mo", "Di", "Mi", "Do", "Fr", "Sa"];
@@ -637,26 +637,31 @@ function Stundenplan() {
 
   const triggerDownload = async (text, filename, mime) => {
     const blob = new Blob([text], { type: mime });
+    const baseMime = mime.split(";")[0];
 
-    // Touch-Geräte (Android-Tablet/Handy, iPad): Android-Share-Sheet zeigt OneDrive, Google Drive etc.
-    const isTouchPrimary = typeof window.matchMedia === "function"
-      && window.matchMedia("(pointer: coarse)").matches
-      && window.matchMedia("(hover: none)").matches;
+    // Mobile-Erkennung: User-Agent ODER coarse Pointer (Brave meldet manchmal nur eines)
+    const isMobile =
+      /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent || "") ||
+      (typeof window.matchMedia === "function" && window.matchMedia("(pointer: coarse)").matches);
 
-    if (isTouchPrimary && navigator.canShare) {
+    // Auf Mobile: Web Share API → System-Share-Sheet (OneDrive, Drive, WhatsApp etc.)
+    if (isMobile && typeof navigator.share === "function") {
       try {
-        const file = new File([blob], filename, { type: mime });
-        if (navigator.canShare({ files: [file] })) {
+        const file = new File([blob], filename, { type: baseMime });
+        const canShareFiles = !navigator.canShare || navigator.canShare({ files: [file] });
+        if (canShareFiles) {
           await navigator.share({ files: [file], title: filename });
           return "saved";
+        } else {
+          console.warn("navigator.canShare({files}) → false für", filename, "MIME:", baseMime);
         }
       } catch (e) {
         if (e && e.name === "AbortError") return "cancelled";
-        console.warn("Share fehlgeschlagen (" + (e && e.name) + "), Fallback:", e);
+        console.warn("Share fehlgeschlagen (" + (e && e.name) + "):", e && e.message);
       }
     }
 
-    // Desktop (Chrome/Edge/Opera/Brave): nativer Speichern-Dialog
+    // Desktop: nativer Speichern-Dialog (Chrome/Edge/Opera/Brave)
     if (typeof window.showSaveFilePicker === "function") {
       try {
         const pickerId = filename.endsWith(".ics") ? "stundenplan-ics" : "stundenplan-json";
@@ -667,11 +672,11 @@ function Stundenplan() {
         return "saved";
       } catch (e) {
         if (e && e.name === "AbortError") return "cancelled";
-        console.warn("Speichern-Dialog fehlgeschlagen (" + (e && e.name) + "), Fallback:", e);
+        console.warn("Speichern-Dialog fehlgeschlagen (" + (e && e.name) + "):", e && e.message);
       }
     }
 
-    // Firefox/Safari oder Fehler: klassischer Download in den Downloads-Ordner
+    // Fallback: klassischer Download in den Downloads-Ordner
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
