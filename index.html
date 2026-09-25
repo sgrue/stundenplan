@@ -41,10 +41,12 @@ const { useState, useRef, useEffect } = React;
 
 // ── Konstanten ────────────────────────────────────────────────────────────────
 const KEY = "stundenplan:v1";
+const KEY_GITHUB = "stundenplan:github";
 const APP_ID = "stundenplan";
 const FILE_VERSION = 1;
-const APP_VERSION = "1.7";
+const APP_VERSION = "1.8";
 const APP_BUILD = "07.09.2026";
+const DEFAULT_GITHUB = { repo: "", path: "stundenplan.json", token: "" };
 const DAY_NAMES = ["Montag", "Dienstag", "Mittwoch", "Donnerstag", "Freitag", "Samstag"];
 const DAY_SHORT = ["Mo", "Di", "Mi", "Do", "Fr", "Sa"];
 const WEEKDAY_ICAL = ["MO", "TU", "WE", "TH", "FR", "SA"];
@@ -179,6 +181,46 @@ const findGaps = (dayItems) => {
 };
 
 const DEFAULT_SETTINGS = { startHour: 9, endHour: 19, days: [true, true, true, true, true, false], maxOverlap: 10, holidays: [] };
+
+// ── GitHub-Sync Helfer ────────────────────────────────────────────────────────
+const utf8ToBase64 = (str) => {
+  const bytes = new TextEncoder().encode(str);
+  let binary = "";
+  for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+  return btoa(binary);
+};
+
+const base64ToUtf8 = (str) => {
+  const clean = String(str).replace(/\s/g, "");
+  const binary = atob(clean);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  return new TextDecoder().decode(bytes);
+};
+
+const githubApi = async (config, method, body) => {
+  const url = `https://api.github.com/repos/${config.repo}/contents/${encodeURIComponent(config.path).replace(/%2F/g, "/")}`;
+  const headers = {
+    "Authorization": `Bearer ${config.token}`,
+    "Accept": "application/vnd.github+json",
+    "X-GitHub-Api-Version": "2022-11-28",
+  };
+  const opts = { method: method || "GET", headers };
+  if (body) {
+    opts.body = JSON.stringify(body);
+    headers["Content-Type"] = "application/json";
+  }
+  const res = await fetch(url, opts);
+  if (res.status === 404) return { notFound: true };
+  let data = null;
+  try { data = await res.json(); } catch (e) {}
+  if (!res.ok) {
+    const err = new Error((data && data.message) || `HTTP ${res.status}`);
+    err.status = res.status;
+    throw err;
+  }
+  return data || {};
+};
 
 // ── iCalendar (.ics) Helpers ──────────────────────────────────────────────────
 const pad2 = (n) => String(n).padStart(2, "0");
@@ -500,6 +542,10 @@ function Stundenplan() {
   const [showAllHolidays, setShowAllHolidays] = useState(false);
   const [blockHover, setBlockHover] = useState(null);
   const [shareInfo, setShareInfo] = useState(null);
+  const [githubConfig, setGithubConfig] = useState(DEFAULT_GITHUB);
+  const [githubMsg, setGithubMsg] = useState(null);
+  const [githubBusy, setGithubBusy] = useState(false);
+  const [githubShowHelp, setGithubShowHelp] = useState(false);
   const dragRef = useRef(null);
   const colRefs = useRef([]);
   const nameRef = useRef(null);
@@ -537,6 +583,22 @@ function Stundenplan() {
       el.scrollIntoView({ behavior: "smooth", block: "nearest" });
     }
   }, [expandedId]);
+
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem(KEY_GITHUB);
+      if (raw) {
+        const cfg = JSON.parse(raw);
+        setGithubConfig(Object.assign({}, DEFAULT_GITHUB, cfg));
+      }
+    } catch (e) {}
+  }, []);
+
+  useEffect(() => {
+    if (!loaded) return;
+    try { localStorage.setItem(KEY_GITHUB, JSON.stringify(githubConfig)); }
+    catch (e) {}
+  }, [githubConfig, loaded]);
 
   const update = (id, patch) => setItems((list) => list.map((s) => (s.id === id ? Object.assign({}, s, patch) : s)));
   const remove = (id) => {
@@ -768,6 +830,73 @@ function Stundenplan() {
   };
 
   const cancelImport = () => { setImportPreview(null); setImportError(""); };
+
+  const validateGithubConfig = () => {
+    if (!githubConfig.repo || !githubConfig.token) return "Repository und Token angeben.";
+    if (!/^[\w.\-]+\/[\w.\-]+$/.test(githubConfig.repo)) return "Repository-Format: owner/name (z. B. sgrue/stundenplan-daten)";
+    if (!githubConfig.path) return "Dateipfad angeben (z. B. stundenplan.json)";
+    return null;
+  };
+
+  const doGithubPush = async () => {
+    setGithubMsg(null);
+    const err = validateGithubConfig();
+    if (err) { setGithubMsg({ ok: false, text: err }); return; }
+    setGithubBusy(true);
+    try {
+      let sha;
+      try {
+        const existing = await githubApi(githubConfig, "GET");
+        if (existing && !existing.notFound) sha = existing.sha;
+      } catch (e) {
+        if (e.status !== 404) throw e;
+      }
+      const data = { app: APP_ID, version: FILE_VERSION, exportedAt: new Date().toISOString(), items, settings };
+      const json = JSON.stringify(data, null, 2);
+      const body = {
+        message: `Stundenplan-Update ${new Date().toLocaleString("de-AT")}`,
+        content: utf8ToBase64(json),
+      };
+      if (sha) body.sha = sha;
+      await githubApi(githubConfig, "PUT", body);
+      const time = new Date().toLocaleTimeString("de-AT", { hour: "2-digit", minute: "2-digit" });
+      setGithubMsg({ ok: true, text: `Auf GitHub gesichert um ${time} Uhr.` });
+    } catch (e) {
+      let hint = "";
+      if (e.status === 401) hint = " · Token ungültig oder abgelaufen";
+      else if (e.status === 404) hint = " · Repository oder Pfad nicht gefunden";
+      else if (e.status === 403) hint = " · Token hat keine Schreibrechte";
+      setGithubMsg({ ok: false, text: `GitHub-Fehler: ${e.message || "unbekannt"}${hint}` });
+    } finally {
+      setGithubBusy(false);
+    }
+  };
+
+  const doGithubPull = async () => {
+    setGithubMsg(null);
+    const err = validateGithubConfig();
+    if (err) { setGithubMsg({ ok: false, text: err }); return; }
+    setGithubBusy(true);
+    try {
+      const res = await githubApi(githubConfig, "GET");
+      if (res && res.notFound) {
+        setGithubMsg({ ok: false, text: "Datei noch nicht im Repository. Erst „Auf GitHub sichern" um sie anzulegen." });
+        return;
+      }
+      const jsonContent = base64ToUtf8(res.content);
+      const parsed = parseImport(jsonContent);
+      setImportPreview(parsed);
+      setImportError("");
+      setGithubMsg({ ok: true, text: "Vorschau geladen. Unten „Ersetzen" bestätigen." });
+    } catch (e) {
+      let hint = "";
+      if (e.status === 401) hint = " · Token ungültig";
+      else if (e.status === 404) hint = " · Datei nicht gefunden";
+      setGithubMsg({ ok: false, text: `GitHub-Fehler: ${e.message || "unbekannt"}${hint}` });
+    } finally {
+      setGithubBusy(false);
+    }
+  };
 
   // ── Ferien-Datei laden ──
   const onHolidayFile = (e) => {
@@ -1220,6 +1349,80 @@ function Stundenplan() {
                 </div>
               </div>
             )}
+
+            <div style={{ fontSize: 11, textTransform: "uppercase", letterSpacing: "0.08em", color: C.muted, marginTop: 18, marginBottom: 8 }}>GitHub-Sync</div>
+            <div style={{ display: "grid", gridTemplateColumns: "auto 1fr", gap: 6, alignItems: "center", fontSize: 12, marginBottom: 8 }}>
+              <span>Repo</span>
+              <input
+                type="text"
+                value={githubConfig.repo}
+                onChange={(e) => setGithubConfig(Object.assign({}, githubConfig, { repo: e.target.value.trim() }))}
+                placeholder="owner/name"
+                className="sp-input"
+                style={{ fontSize: 12, padding: "4px 6px", fontFamily: MONO }}
+                autoComplete="off"
+                aria-label="GitHub Repository"
+              />
+              <span>Datei</span>
+              <input
+                type="text"
+                value={githubConfig.path}
+                onChange={(e) => setGithubConfig(Object.assign({}, githubConfig, { path: e.target.value.trim() }))}
+                placeholder="stundenplan.json"
+                className="sp-input"
+                style={{ fontSize: 12, padding: "4px 6px", fontFamily: MONO }}
+                autoComplete="off"
+                aria-label="Dateipfad im Repository"
+              />
+              <span>Token</span>
+              <input
+                type="password"
+                value={githubConfig.token}
+                onChange={(e) => setGithubConfig(Object.assign({}, githubConfig, { token: e.target.value.trim() }))}
+                placeholder="Personal Access Token"
+                className="sp-input"
+                style={{ fontSize: 12, padding: "4px 6px", fontFamily: MONO }}
+                autoComplete="off"
+                aria-label="Personal Access Token"
+              />
+            </div>
+            <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+              <button className="sp-btn" onClick={doGithubPush} disabled={githubBusy || !githubConfig.repo || !githubConfig.token} style={{ opacity: (githubBusy || !githubConfig.repo || !githubConfig.token) ? 0.5 : 1 }}>
+                {githubBusy ? "…" : "Auf GitHub sichern"}
+              </button>
+              <button className="sp-btn" onClick={doGithubPull} disabled={githubBusy || !githubConfig.repo || !githubConfig.token} style={{ opacity: (githubBusy || !githubConfig.repo || !githubConfig.token) ? 0.5 : 1 }}>
+                Von GitHub laden
+              </button>
+              <button className="sp-mini" onClick={() => setGithubShowHelp(!githubShowHelp)} title="Setup-Anleitung">?</button>
+            </div>
+            {githubMsg && (
+              <div style={{
+                fontSize: 11,
+                color: githubMsg.ok ? PREF.bg : C.danger,
+                marginTop: 6,
+                padding: githubMsg.ok ? "0" : "4px 8px",
+                background: githubMsg.ok ? "transparent" : C.dangerSoft,
+                borderRadius: 4,
+              }}>
+                {githubMsg.text}
+              </div>
+            )}
+            {githubShowHelp && (
+              <div style={{ fontSize: 11, color: C.muted, marginTop: 8, padding: 10, background: "#F7F7F5", border: `1px solid ${C.border}`, borderRadius: 6, lineHeight: 1.5 }}>
+                <div style={{ fontWeight: 600, color: C.ink, marginBottom: 4 }}>Einrichtung (einmalig)</div>
+                <ol style={{ paddingLeft: 18, margin: "4px 0" }}>
+                  <li>Auf GitHub ein <strong>privates Repository</strong> anlegen (z. B. <code>stundenplan-daten</code>)</li>
+                  <li><strong>Settings ▸ Developer settings ▸ Personal access tokens ▸ Fine-grained tokens ▸ Generate new token</strong></li>
+                  <li>Repository access: <em>„Only select repositories"</em> → dein neues Repo wählen</li>
+                  <li>Repository permissions ▸ <strong>Contents: „Read and write"</strong></li>
+                  <li>Token generieren, kopieren, oben ins Token-Feld einfügen</li>
+                </ol>
+                <div style={{ marginTop: 6 }}>Token bleibt lokal im Browser · nie im JSON-Export enthalten · Requests gehen nur an <code>api.github.com</code>.</div>
+              </div>
+            )}
+            <div style={{ fontSize: 11, color: C.muted, marginTop: 6 }}>
+              Jede Speicherung ist ein Commit im Repo — automatische Versionshistorie.
+            </div>
 
             <div style={{ fontSize: 11, textTransform: "uppercase", letterSpacing: "0.08em", color: C.muted, marginTop: 18, marginBottom: 8 }}>Google Kalender</div>
             <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 10, flexWrap: "wrap", fontSize: 12 }}>
