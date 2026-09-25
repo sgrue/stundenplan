@@ -44,7 +44,7 @@ const KEY = "stundenplan:v1";
 const KEY_GITHUB = "stundenplan:github";
 const APP_ID = "stundenplan";
 const FILE_VERSION = 1;
-const APP_VERSION = "1.8";
+const APP_VERSION = "1.9";
 const APP_BUILD = "07.09.2026";
 const DEFAULT_GITHUB = { repo: "", path: "stundenplan.json", token: "" };
 const DAY_NAMES = ["Montag", "Dienstag", "Mittwoch", "Donnerstag", "Freitag", "Samstag"];
@@ -880,14 +880,14 @@ function Stundenplan() {
     try {
       const res = await githubApi(githubConfig, "GET");
       if (res && res.notFound) {
-        setGithubMsg({ ok: false, text: "Datei noch nicht im Repository. Erst „Auf GitHub sichern" um sie anzulegen." });
+        setGithubMsg({ ok: false, text: `Datei noch nicht im Repository. Erst 'Auf GitHub sichern' um sie anzulegen.` });
         return;
       }
       const jsonContent = base64ToUtf8(res.content);
       const parsed = parseImport(jsonContent);
       setImportPreview(parsed);
       setImportError("");
-      setGithubMsg({ ok: true, text: "Vorschau geladen. Unten „Ersetzen" bestätigen." });
+      setGithubMsg({ ok: true, text: `Vorschau geladen. Unten 'Ersetzen' bestätigen.` });
     } catch (e) {
       let hint = "";
       if (e.status === 401) hint = " · Token ungültig";
@@ -1413,8 +1413,8 @@ function Stundenplan() {
                 <ol style={{ paddingLeft: 18, margin: "4px 0" }}>
                   <li>Auf GitHub ein <strong>privates Repository</strong> anlegen (z. B. <code>stundenplan-daten</code>)</li>
                   <li><strong>Settings ▸ Developer settings ▸ Personal access tokens ▸ Fine-grained tokens ▸ Generate new token</strong></li>
-                  <li>Repository access: <em>„Only select repositories"</em> → dein neues Repo wählen</li>
-                  <li>Repository permissions ▸ <strong>Contents: „Read and write"</strong></li>
+                  <li>Repository access: <em>"Only select repositories"</em> → dein neues Repo wählen</li>
+                  <li>Repository permissions ▸ <strong>Contents: "Read and write"</strong></li>
                   <li>Token generieren, kopieren, oben ins Token-Feld einfügen</li>
                 </ol>
                 <div style={{ marginTop: 6 }}>Token bleibt lokal im Browser · nie im JSON-Export enthalten · Requests gehen nur an <code>api.github.com</code>.</div>
